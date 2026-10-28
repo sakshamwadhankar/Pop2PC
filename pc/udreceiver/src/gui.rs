@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Gdi::{
     FillRect, GetStockObject, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor,
     UpdateWindow, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
     DRAW_TEXT_FORMAT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
-    FF_DONTCARE, FW_BOLD, FW_NORMAL, HBRUSH, HDC, HFONT, HGDIOBJ, NULL_PEN, OUT_DEFAULT_PRECIS,
+    FF_DONTCARE, FW_BOLD, FW_NORMAL, HDC, HFONT, HGDIOBJ, NULL_PEN, OUT_DEFAULT_PRECIS,
     PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList, GetConsoleWindow};
@@ -36,8 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GetClientRect, GetMessageW, GetSystemMetrics, LoadCursorW, PostQuitMessage,
     RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos,
-    ShowWindow, TranslateMessage, CREATESTRUCTW, HTCLIENT, ICONINFO, IDC_ARROW, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    ShowWindow, TranslateMessage, HTCLIENT, ICONINFO, IDC_ARROW, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, SW_HIDE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
     WM_LBUTTONUP, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WINDOW_EX_STYLE,
     WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
@@ -48,7 +48,6 @@ use crate::session;
 // ------------------------------------------------------------------ palette / layout
 
 const BG: u32 = 0x0B0E14;
-const SURFACE: u32 = 0x141922;
 const RAISED: u32 = 0x1C2230;
 const BORDER: u32 = 0x2A3140;
 const TEXT: u32 = 0xE8ECF2;
@@ -56,7 +55,6 @@ const SECONDARY: u32 = 0x9AA4B2;
 const DIM: u32 = 0x6E7887;
 const ACCENT: u32 = 0x4C8DFF;
 const ON_ACCENT: u32 = 0xFFFFFF;
-const SUCCESS: u32 = 0x39D98A;
 
 /// Logical (96 dpi) client size. The window is scaled by the system DPI.
 const CW: i32 = 480;
@@ -372,6 +370,9 @@ pub fn run() -> i32 {
 /// The normal user path still discovers the phone with mDNS.
 pub fn run_with_addr(addr: Option<String>) -> i32 {
     hide_console_if_owned();
+    // B-112: after a forced kill the previous lock desktop can still be this thread's
+    // desktop; recover it before the first window or child process exists.
+    crate::lock::prepare_gui_thread();
     crypto::ensure_ring_default();
     let trusted = !TrustedPhoneStore::open().entries().is_empty();
     let (tx, rx) = mpsc::channel();
@@ -495,9 +496,9 @@ fn make_icon() -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
                     (0x4C, 0x8D, 0xFF)
                 } else if (10..22).contains(&x) && (8..18).contains(&y) {
                     (0x0B, 0x0E, 0x14)
-                } else if (14..18).contains(&x) && (20..25).contains(&y) {
-                    (0x4C, 0x8D, 0xFF)
-                } else if (10..22).contains(&x) && (25..27).contains(&y) {
+                } else if ((14..18).contains(&x) && (20..25).contains(&y))
+                    || ((10..22).contains(&x) && (25..27).contains(&y))
+                {
                     (0x4C, 0x8D, 0xFF)
                 } else {
                     (0x0B, 0x0E, 0x14)
@@ -1133,6 +1134,7 @@ fn fill_rect(hdc: HDC, x: i32, y: i32, w: i32, h: i32, hex: u32, s: f32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn round_fill(hdc: HDC, x: i32, y: i32, w: i32, h: i32, hex: u32, radius: f32, s: f32) {
     unsafe {
         let brush = CreateSolidBrush(color(hex));

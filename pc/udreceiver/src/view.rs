@@ -68,8 +68,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, keybd_event, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU, VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetForegroundWindow,
@@ -130,6 +129,10 @@ struct Shared {
     /// D8: the desktop size the phone renders, chosen from the client aspect before video-on.
     desktop_w: AtomicU32,
     desktop_h: AtomicU32,
+    /// B-110: the coded frame size of the newest decoded picture (0 before the first
+    /// frame). Input uses it to follow the exact rectangle the video is drawn into.
+    video_w: AtomicU32,
+    video_h: AtomicU32,
     need_keyframe: AtomicU32,
     release_all: AtomicU32,
     presented: AtomicU64,
@@ -166,6 +169,8 @@ impl Shared {
             client_h: AtomicU32::new(1080),
             desktop_w: AtomicU32::new(1920),
             desktop_h: AtomicU32::new(1080),
+            video_w: AtomicU32::new(0),
+            video_h: AtomicU32::new(0),
             need_keyframe: AtomicU32::new(0),
             release_all: AtomicU32::new(0),
             presented: AtomicU64::new(0),
@@ -234,6 +239,14 @@ impl Shared {
         (
             self.desktop_w.load(Ordering::SeqCst) as i32,
             self.desktop_h.load(Ordering::SeqCst) as i32,
+        )
+    }
+
+    /// B-110: coded size of the newest decoded frame (0 until the first frame).
+    fn video(&self) -> (i32, i32) {
+        (
+            self.video_w.load(Ordering::SeqCst) as i32,
+            self.video_h.load(Ordering::SeqCst) as i32,
         )
     }
 }
@@ -357,8 +370,11 @@ pub fn run(
                 if !sh.running.load(Ordering::SeqCst) || secs > 0 {
                     break result;
                 }
-                let deadline = Instant::now() + Duration::from_secs(10);
                 println!("[{TAG}] RECONNECT start_us={} target={reconnect_addr}", now_us64());
+                // B-116(b): exponential backoff, and give up at once on a phone that refuses
+                // us (forgotten pin / desktop already shown to another PC). The old 250 ms
+                // loop hammered the phone with a new decoder ~4 times a second forever.
+                let mut attempt: u32 = 0;
                 let next_session = loop {
                     if !sh.running.load(Ordering::SeqCst) {
                         break Err("view stopped during reconnect".into());
@@ -377,10 +393,20 @@ pub fn run(
                             break Ok(next);
                         }
                         Err(e) => {
-                            if Instant::now() >= deadline {
-                                break Err(format!("reconnect timed out: {e}"));
+                            if crate::session::terminal_connect_error(&e) {
+                                println!("[{TAG}] RECONNECT give up: {e}");
+                                break Err(e);
                             }
-                            std::thread::sleep(Duration::from_millis(250));
+                            if attempt >= 8 {
+                                break Err(format!("could not reconnect to your phone: {e}"));
+                            }
+                            let delay = crate::session::reconnect_delay_ms(attempt);
+                            println!(
+                                "[{TAG}] RECONNECT retry in {delay} ms (attempt {}) after: {e}",
+                                attempt + 1
+                            );
+                            std::thread::sleep(Duration::from_millis(delay));
+                            attempt += 1;
                         }
                     }
                 };
@@ -468,27 +494,18 @@ fn stats_loop(shared: Arc<Shared>) {
     let mut last_bytes = 0u64;
     let mut last_decode_us = 0u64;
     let mut last_decoded = 0u64;
-    let mut last_focus_claim = Instant::now() - Duration::from_secs(10);
     loop {
         std::thread::sleep(Duration::from_millis(1000));
         if !shared.running.load(Ordering::SeqCst) {
             return;
         }
-        // Keep the keyboard on this window: without it, PC keystrokes go to whatever else is
-        // open and the phone never sees them. Re-claimed at most every 2 s.
-        // Phase 9: while the lock is active this thread is on the default desktop and cannot
-        // see or take the lock desktop's foreground; the lock's own window keeps focus.
-        if !crate::lock::is_active() {
-            let hwnd = HWND(shared.hwnd.load(Ordering::Relaxed) as *mut std::ffi::c_void);
-            if !hwnd.0.is_null()
-                && !foreground_is(hwnd)
-                && last_focus_claim.elapsed() >= Duration::from_secs(2)
-            {
-                focus_window(hwnd);
-                last_focus_claim = Instant::now();
-                println!("[{TAG}] keyboard focus reclaimed by the session window");
-            }
-        }
+        // T-007: focus is claimed ONCE when the view window is created (create_window),
+        // never on a timer. The old 2 s reclaim called SetForegroundWindow and injected a
+        // synthetic ALT key into whatever app was in front, which made a windowed (F11)
+        // no-lock view unusable with any other PC app. A window that loses the foreground
+        // now simply stops receiving keys until the user clicks it again - normal Windows
+        // behaviour. The full-screen lock never needed the reclaim: it owns the input on
+        // its own desktop.
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f64().max(1e-6);
         let presented = shared.presented.load(Ordering::Relaxed);
@@ -524,24 +541,17 @@ fn foreground_is(hwnd: HWND) -> bool {
     unsafe { GetForegroundWindow() == hwnd }
 }
 
-/// Windows only lets a process take the foreground if it owns the last input event; a pair of
-/// synthetic ALT events puts us in that state (the documented workaround), after which a plain
-/// SetForegroundWindow succeeds. The session window must hold the keyboard, or PC keystrokes
-/// land in whatever else the user has open.
+/// Windows only lets a process take the foreground if it owns the last input event. The old
+/// workaround injected a synthetic ALT down/up to satisfy that rule; tester T-007 showed the
+/// ALT going to whatever app was in front, so the view now only asks for the foreground once,
+/// when its own window is created (normally already the active window).
 ///
-/// Phase 9: on the private lock desktop the process owns the input already, and the ALT trick
-/// would be needless synthetic input on a locked machine, so it is skipped.
+/// Phase 9: on the private lock desktop the process owns the input already, so nothing extra
+/// is needed there either.
 fn focus_window(hwnd: HWND) {
     unsafe {
-        if crate::lock::is_active() {
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
-            return;
-        }
-        let alt = VK_MENU.0 as u8;
-        keybd_event(alt, 0, KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(alt, 0, KEYEVENTF_KEYUP, 0);
         let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
     }
 }
 
@@ -624,10 +634,13 @@ fn now_us64() -> i64 {
 
 fn scaled(shared: &Shared, x: i32, y: i32) -> (i32, i32) {
     let (cw, ch) = shared.client();
-    // B-064: the same letterbox math the blit uses, now pure and unit-tested in phase5.rs.
-    // D8: the target is the negotiated desktop, not the old fixed 1920x1080.
+    // B-064/B-110: the same rectangle the blit uses, now pure and unit-tested in
+    // phase5.rs. D8: the target is the negotiated desktop, not the old fixed 1920x1080;
+    // B-110: use the decoded frame size so 1088-line padding and encoder downscales do
+    // not shift the click.
     let (dw, dh) = shared.desktop();
-    phase5::scale_client_to_desktop_for(x, y, cw, ch, dw, dh)
+    let (vw, vh) = shared.video();
+    phase5::scale_client_to_desktop_with_video(x, y, cw, ch, vw, vh, dw, dh)
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -700,6 +713,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let (dx, dy) = scaled(&shared, x, y);
             let down = matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN);
+            if down {
+                // B-110 diagnostic: one line per press with every rectangle involved.
+                let (cw, ch) = shared.client();
+                let (vw, vh) = shared.video();
+                let (dw, dh) = shared.desktop();
+                println!(
+                    "[{TAG}] click client={cw}x{ch} video={vw}x{vh} desk={dw}x{dh} at={x},{y} -> {dx},{dy}"
+                );
+            }
             let button = match msg {
                 WM_LBUTTONDOWN | WM_LBUTTONUP => phase5::BTN_LEFT,
                 WM_RBUTTONDOWN | WM_RBUTTONUP => phase5::BTN_RIGHT,
@@ -1840,6 +1862,9 @@ impl Pipeline {
             let (in_w, in_h) = (self.dec.out_w, self.dec.out_h);
             let (out_w, out_h) = self.shared.client();
             let (desk_w, desk_h) = self.shared.desktop();
+            // B-110: input runs on the window thread and needs the coded frame size.
+            self.shared.video_w.store(in_w.max(0) as u32, Ordering::SeqCst);
+            self.shared.video_h.store(in_h.max(0) as u32, Ordering::SeqCst);
             self.ensure_swap_size(out_w, out_h)?;
             if !self.geom_logged {
                 let d = unsafe { self.swap.GetDesc1() }.unwrap_or_default();
@@ -2469,11 +2494,8 @@ fn blit_soft(d3d_ctx: &ID3D11DeviceContext, dec: &mut Decoder, swap: &IDXGISwapC
 /// the window they leave the green band seen below the taskbar (B-085). The desktop size declares
 /// the real aspect, so crop the coded height to that aspect (D8).
 fn visible_size(in_w: i32, in_h: i32, desk_w: i32, desk_h: i32) -> (i32, i32) {
-    let in_w = in_w.max(2);
-    let in_h = in_h.max(2);
-    let (dw, dh) = (desk_w.max(2), desk_h.max(2));
-    let aspect_h = ((in_w as f64 * dh as f64 / dw as f64).round() as i32).clamp(2, in_h);
-    (in_w, aspect_h)
+    // B-110: one implementation for the renderer and input mapping.
+    phase5::visible_size_for(in_w, in_h, desk_w, desk_h)
 }
 
 /// Fit `iw x ih` inside `ow x oh`, keeping the aspect ratio.

@@ -623,7 +623,15 @@ class Phase4LinkService : Service() {
         // pass data channels through the gate (manager review 2026-10-18).
         var paired = pinned.any { it.first == clientFpr }
         if (desktopRuntime.isUp() && !paired) {
+            // B-116(c): say WHY, so the PC can show a plain message instead of reconnecting
+            // blindly. The phone keeps its live desktop and never opens the gate.
             say("SESSION refused different PC while desktop is live fpr=${clientFpr.take(16)}")
+            val why = "refused desktop-live"
+            runCatching {
+                val o = sock.outputStream
+                o.write(Phase4Protocol.encodeFrame(Phase4Protocol.CH_CONTROL, 0, why.toByteArray()))
+                o.flush()
+            }
             try { sock.close() } catch (_: Throwable) {}
             return
         }
@@ -631,8 +639,10 @@ class Phase4LinkService : Service() {
         // One pairing at a time: claim the slot atomically (compareAndSet); a second
         // unpaired connection is refused so the user's Yes is always bound to one PC.
         var decisionPending: Pairing? = null
+        var pairCode: String? = null
         if (!paired) {
             val code = Phase4Crypto.pairingCode(identityCert().encoded, client.encoded)
+            pairCode = code
             val p = Pairing(code, clientFpr)
             if (!pendingPairing.compareAndSet(null, p)) {
                 say("PAIRING busy - rejecting concurrent unpaired connection from ${clientFpr.take(16)}")
@@ -684,6 +694,14 @@ class Phase4LinkService : Service() {
         }
         // B-047: a paired session gets NO video until the PC asks with "video-on".
         p5.start(false)
+        // B-116(a): the PC must not treat a pin alone as proof that this phone still trusts
+        // it. Say "trusted" on a pinned session, or offer the code when the phone has
+        // forgotten the PC. The PC shows the code screen and waits for Yes before it locks.
+        if (paired) {
+            p5.sendControl("trusted")
+        } else if (pairCode != null) {
+            p5.sendControl("pair $pairCode")
+        }
         // Phase 11 D-b: phone sound -> PC on CH_AUDIO, only while this session is live.
         Phase11Audio.bindSink { bytes ->
             p5.writer.push(Phase4Protocol.Message.create(Phase4Protocol.CH_AUDIO, bytes))
@@ -700,6 +718,9 @@ class Phase4LinkService : Service() {
                     // tick: apply a pending pairing decision even if the PC sends nothing
                     val p = decisionPending
                     if (p != null) {
+                        // B-126: a re-pair prompt starts mid-session (the phone already
+                        // pinned this PC), so the Yes line must say so honestly.
+                        val wasPaired = paired
                         when (p.decision.get()) {
                             true -> {
                                 Phase4Crypto.trustedRemember(applicationContext, clientFpr, "PC")
@@ -708,10 +729,17 @@ class Phase4LinkService : Service() {
                                         Phase4Protocol.CH_CONTROL, "pair-ok".toByteArray()
                                     )
                                 )
-                                say(
-                                    "PAIR_YES stored fpr=${clientFpr.take(16)} pins=" +
-                                        Phase4Crypto.trustedList(applicationContext).size
-                                )
+                                if (wasPaired) {
+                                    say(
+                                        "REPAIR stored fpr=${clientFpr.take(16)} pins=" +
+                                            Phase4Crypto.trustedList(applicationContext).size
+                                    )
+                                } else {
+                                    say(
+                                        "PAIR_YES stored fpr=${clientFpr.take(16)} pins=" +
+                                            Phase4Crypto.trustedList(applicationContext).size
+                                    )
+                                }
                                 paired = true // same session: data channels now pass the gate
                                 live.armed = true // dead-link watchdog applies from now on
                                 markConnected()
@@ -720,7 +748,11 @@ class Phase4LinkService : Service() {
                                 cancelPairingNotification()
                                 sock.soTimeout = Phase4Protocol.DEAD_TIMEOUT_MS.toInt()
                                 // B-047: video still waits for the PC's "video-on"
-                                say("P5 gate open, waiting for video-on")
+                                if (wasPaired) {
+                                    say("P5 gate stays open, waiting for video-on")
+                                } else {
+                                    say("P5 gate open, waiting for video-on")
+                                }
                             }
                             false -> {
                                 p5.writer.push(
@@ -771,12 +803,41 @@ class Phase4LinkService : Service() {
                             p5.onInputMessage(m.payload)
                         }
                         m.channel == Phase4Protocol.CH_CONTROL && m.payload.isNotEmpty() -> {
-                            // Phase 5: need-keyframe / clock sync / release-all
-                            p5.onControlMessage(String(m.payload, Charsets.UTF_8))
+                            // Phase 5: need-keyframe / clock sync / release-all. B-115: a
+                            // non-empty control line may start video or resize the desktop,
+                            // so it is refused until the PC is trusted (or Yes was tapped).
+                            // B-126: a PC that has forgotten this phone asks again with
+                            // "pair-request"; show the code prompt even though the phone
+                            // still pins this PC. The prompt keeps the B-115 gate closed
+                            // until Yes: the PC waits for pair-ok before asking for video.
+                            val controlText = String(m.payload, Charsets.UTF_8)
+                            if (Phase4RePair.wanted(paired, decisionPending != null, controlText)) {
+                                val code = Phase4Crypto.pairingCode(identityCert().encoded, client.encoded)
+                                val p = Pairing(code, clientFpr)
+                                if (pendingPairing.compareAndSet(null, p)) {
+                                    decisionPending = p
+                                    // Prompt window: the dead-link watchdog must not close
+                                    // the session while the user compares codes.
+                                    live.armed = false
+                                    showPairingNotification(code)
+                                    say("PAIRING prompt code=$code reason=pc-forgot")
+                                    sock.soTimeout = 1_500
+                                    continue
+                                }
+                            }
+                            if (!Phase4Protocol.mayProcessControl(m.payload, gate)) {
+                                say("DROP control \"${String(m.payload, Charsets.UTF_8).take(40)}\" (gate=$gate)")
+                            } else {
+                                p5.onControlMessage(
+                                    String(m.payload, Charsets.UTF_8),
+                                    gateOpen = gate == Phase4Protocol.Gate.PAIRED,
+                                )
+                            }
                         }
                         m.channel == Phase4Protocol.CH_CLIP && m.payload.isNotEmpty() -> {
                             // Phase 11 D-c: text from the PC clipboard
                             Phase11Clip.onRemote(m.payload)
+                            p5.shell()?.toast(Toasts.COPIED)
                         }
                         m.channel == Phase4Protocol.CH_AUDIO && m.payload.isNotEmpty() -> {
                             // phone -> PC only; a PC must never push audio into our player
@@ -801,6 +862,7 @@ class Phase4LinkService : Service() {
                                 if (saved != null) {
                                     say("P11FILE saved ${saved.name} ${saved.length()} B sha256=" +
                                         Phase11Files.sha256(saved).joinToString("") { "%02x".format(it) }.take(16))
+                                    p5.shell()?.toast(Toasts.fileReceived(saved.name))
                                 }
                             } catch (t: Throwable) {
                                 say("P11FILE failed ${t.javaClass.simpleName}: ${t.message}")
@@ -813,6 +875,7 @@ class Phase4LinkService : Service() {
         } catch (t: Throwable) {
             say("SESSION io ${t.javaClass.simpleName}: ${t.message?.take(60)}")
         } finally {
+            if (!stopping) p5.shell()?.toast(Toasts.LINK_LOST)
             p5.stop(if (stopping) "service stop" else "link lost")
             Phase11Audio.unbindSink(if (stopping) "service stop" else "session end")
             liveSessions.remove(live)
@@ -863,6 +926,8 @@ class Phase4LinkService : Service() {
                 )
             )
         if (withActions) {
+            // B-125: the code must be readable on a secure lock screen.
+            b.setVisibility(Notification.VISIBILITY_PUBLIC)
             val yes = PendingIntent.getService(
                 this, 1,
                 Intent(this, Phase4LinkService::class.java).setAction(ACTION_PAIR_YES),
@@ -927,13 +992,16 @@ class Phase4LinkService : Service() {
     }
 
     private fun showPairingNotification(code: String) {
-        // Step 10: the home screen already shows the code and Yes/No. A heads-up on top of
-        // that covers the buttons the owner is about to tap, so only post it when our app
-        // is in the background.
-        if (AppForeground.isForeground) {
-            say("PAIRING notification skipped: app in front")
+        // B-125: the home screen shows the code and Yes/No only while the user can see it.
+        // With the screen off or the keyguard up, the notification is the only prompt, so
+        // skip it only when the app is truly in front and visible.
+        val interactive = getSystemService(android.os.PowerManager::class.java)?.isInteractive ?: true
+        val keyguardLocked = getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked ?: false
+        if (!Phase4PairingPrompt.wanted(AppForeground.isForeground, interactive, keyguardLocked)) {
+            say("PAIRING notification skipped: app in front (interactive=$interactive keyguard=$keyguardLocked)")
             return
         }
+        say("PAIRING notification posted fg=${AppForeground.isForeground} interactive=$interactive keyguard=$keyguardLocked")
         val n = buildNotification(
             "Pair this PC?",
             "Does your PC show $code?",

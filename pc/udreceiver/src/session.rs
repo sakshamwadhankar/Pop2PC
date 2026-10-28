@@ -340,39 +340,117 @@ where
     // trust decision is the user comparing the 6-digit code and tapping Yes on the phone.
     let already_pinned = store.find(&fp).is_some();
     let (description, session) = if already_pinned {
-        (
-            format!(
-                "reconnected silently to pinned phone {} ({})",
-                &fingerprint_hex(&fp)[..16],
-                addr
+        // B-116(a): a local pin is not proof that the phone still trusts this PC. Wait for
+        // the phone's own answer before reporting success; the GUI only starts the lock
+        // after this function returns, so a forgotten PC never reaches a locked desktop.
+        match wait_pinned_start(&mut tls)? {
+            PhoneGreeting::Trusted => (
+                format!(
+                    "reconnected to phone {} ({}) - phone confirmed this PC",
+                    &fingerprint_hex(&fp)[..16],
+                    addr
+                ),
+                Session {
+                    tls,
+                    phone_fp: fp,
+                    pinned: true,
+                },
             ),
-            Session {
-                tls,
-                phone_fp: fp,
-                pinned: true,
-            },
-        )
-    } else {
-        // first connect: show the 6-digit code and wait for the phone's Yes
-        let my_fp = identity.fingerprint();
-        let code = pairing_code(&fp, &my_fp);
-        on_code(&code);
-        println!("PC code:  {code}  <-- MUST match the code on the phone");
-        println!("Waiting for Yes on the phone (up to {PAIR_CONFIRM_TIMEOUT:?}) ...");
-        let ok = wait_pair_confirm(&mut tls)?;
-        if !ok {
-            return Err("phone answered No; nothing was stored".to_string());
+            PhoneGreeting::Pair(from_phone) => {
+                let code = if from_phone.is_empty() {
+                    let my_fp = identity.fingerprint();
+                    pairing_code(&fp, &my_fp)
+                } else {
+                    from_phone
+                };
+                on_code(&code);
+                println!("Phone forgot this PC. PC code:  {code}  <-- MUST match the code on the phone");
+                println!("Waiting for Yes on the phone (up to {PAIR_CONFIRM_TIMEOUT:?}) ...");
+                if !wait_pair_confirm(&mut tls)? {
+                    return Err("phone answered No; nothing was stored".to_string());
+                }
+                store.remember(&fp, label);
+                (
+                    format!(
+                        "re-paired with phone {} ({addr}) after the phone forgot this PC",
+                        &fingerprint_hex(&fp)[..16]
+                    ),
+                    Session {
+                        tls,
+                        phone_fp: fp,
+                        pinned: true,
+                    },
+                )
+            }
+            PhoneGreeting::Refused(why) => {
+                let plain = if why.contains("desktop-live") {
+                    "Your phone is already showing a desktop to another PC. Stop the desktop on the phone, then try again."
+                } else {
+                    "Your phone does not trust this PC any more - pair again"
+                };
+                return Err(plain.to_string());
+            }
+            PhoneGreeting::Other => {
+                return Err("your phone did not confirm this PC; open the app and pair again"
+                    .to_string())
+            }
         }
-        store.remember(&fp, label);
-        println!("Phone confirmed. Pin saved to {}", store.path().display());
-        (
-            format!("paired with phone {} ({addr})", &fingerprint_hex(&fp)[..16]),
-            Session {
-                tls,
-                phone_fp: fp,
-                pinned: true,
-            },
-        )
+    } else {
+        // B-126: an unpaired PC must never print a code the phone did not show. Read
+        // the phone's greeting first (10 s deadline); then act on what the phone says.
+        let start = classify_unpinned_start(wait_pinned_start(&mut tls)?);
+        match start {
+            UnpinnedStart::RepromptForTrusted => {
+                // The phone still trusts this PC, but this PC forgot the phone. Send
+                // "pair-request" so the phone shows the code again and asks the user;
+                // this PC must not treat its own pin as proof of the phone's trust.
+                write_frame(&mut tls, CH_CONTROL, 0, b"pair-request")?;
+                let code = pairing_code(&fp, &identity.fingerprint());
+                on_code(&code);
+                println!("PC code:  {code}  <-- MUST match the code on the phone");
+                println!("This PC no longer knows this phone. Confirm the code on the phone (up to {PAIR_CONFIRM_TIMEOUT:?}) ...");
+                if !wait_pair_confirm(&mut tls)? {
+                    return Err("phone answered No; nothing was stored".to_string());
+                }
+                store.remember(&fp, label);
+                println!("Phone confirmed. Pin saved to {}", store.path().display());
+                (
+                    format!(
+                        "paired again with phone {} ({addr}) - the phone still trusted this PC",
+                        &fingerprint_hex(&fp)[..16]
+                    ),
+                    Session {
+                        tls,
+                        phone_fp: fp,
+                        pinned: true,
+                    },
+                )
+            }
+            UnpinnedStart::PairWithPhoneCode(from_phone) => {
+                let code = if from_phone.is_empty() {
+                    pairing_code(&fp, &identity.fingerprint())
+                } else {
+                    from_phone
+                };
+                on_code(&code);
+                println!("PC code:  {code}  <-- MUST match the code on the phone");
+                println!("Waiting for Yes on the phone (up to {PAIR_CONFIRM_TIMEOUT:?}) ...");
+                if !wait_pair_confirm(&mut tls)? {
+                    return Err("phone answered No; nothing was stored".to_string());
+                }
+                store.remember(&fp, label);
+                println!("Phone confirmed. Pin saved to {}", store.path().display());
+                (
+                    format!("paired with phone {} ({addr})", &fingerprint_hex(&fp)[..16]),
+                    Session {
+                        tls,
+                        phone_fp: fp,
+                        pinned: true,
+                    },
+                )
+            }
+            UnpinnedStart::Refuse(reason) => return Err(reason),
+        }
     };
     Ok((session, description))
 }
@@ -426,6 +504,118 @@ fn wait_pair_confirm_inner(tls: &mut TlsStream) -> Result<bool, String> {
 
 fn echo_keepalive(tls: &mut TlsStream) {
     let _ = write_frame(tls, CH_CONTROL, FLAG_KEEPALIVE_ECHO, &[]);
+}
+
+/// B-116(a): what the phone says first on a session. A pin in our store only says that WE
+/// trusted the phone once; it does not prove the phone still trusts US. The phone answers
+/// `trusted` for a live pin, `pair <code>` when it has forgotten us, or `refused <why>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhoneGreeting {
+    Trusted,
+    Pair(String),
+    Refused(String),
+    Other,
+}
+
+/// Pure state decision, unit-tested: classify the phone's first control line.
+pub fn classify_phone_greeting(text: &str) -> PhoneGreeting {
+    let t = text.trim();
+    if t == "trusted" {
+        return PhoneGreeting::Trusted;
+    }
+    if let Some(rest) = t.strip_prefix("pair") {
+        return PhoneGreeting::Pair(rest.trim().to_string());
+    }
+    if let Some(rest) = t.strip_prefix("refused") {
+        return PhoneGreeting::Refused(rest.trim().to_string());
+    }
+    PhoneGreeting::Other
+}
+
+/// B-126: what an unpaired PC does with the phone's greeting. A local pin is not proof
+/// the phone still trusts us, so even a `Trusted` answer means "ask the phone to show
+/// the code again and have the user confirm". Pure so the whole decision is unit-tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnpinnedStart {
+    RepromptForTrusted,
+    PairWithPhoneCode(String),
+    Refuse(String),
+}
+
+/// Classify the phone's opening greeting for an unpaired (unpinned) PC. Trusted -> ask
+/// the phone again; Pair(c) -> reuse the phone's code; Refused/Other -> refuse plainly.
+pub fn classify_unpinned_start(g: PhoneGreeting) -> UnpinnedStart {
+    match g {
+        PhoneGreeting::Trusted => UnpinnedStart::RepromptForTrusted,
+        PhoneGreeting::Pair(c) => UnpinnedStart::PairWithPhoneCode(c),
+        PhoneGreeting::Refused(why) => {
+            let plain = if why.contains("desktop-live") {
+                "Your phone is already showing a desktop to another PC. Stop the desktop on the phone, then try again."
+            } else {
+                "Your phone does not trust this PC any more - pair again"
+            };
+            UnpinnedStart::Refuse(plain.to_string())
+        }
+        PhoneGreeting::Other => UnpinnedStart::Refuse(
+            "your phone did not confirm this PC; open the app and pair again".to_string(),
+        ),
+    }
+}
+
+/// B-116(b): reconnect backoff. 0.5 s, 1 s, 2 s, 4 s, then 8/10 s capped at 10 s.
+/// Pure so the sequence is unit-tested without sleeping.
+pub fn reconnect_delay_ms(attempt: u32) -> u64 {
+    let ms = 500u64.saturating_mul(1u64 << attempt.min(5));
+    ms.min(10_000)
+}
+
+/// B-116(b): errors that retrying cannot fix. A refused/forgotten phone or a phone that is
+/// already showing a desktop needs the user, so the reconnect loop must give up with the
+/// plain message instead of hammering it forever. Pure and unit-tested.
+pub fn terminal_connect_error(e: &str) -> bool {
+    e.contains("does not trust")
+        || e.contains("already showing a desktop")
+        || e.contains("phone answered No")
+        || e.contains("pair again")
+}
+
+/// B-116(a): wait for the phone's opening control line on a pinned reconnect. This runs
+/// BEFORE the caller reports success, so the GUI cannot start the lock on one-sided trust.
+fn wait_pinned_start(tls: &mut TlsStream) -> Result<PhoneGreeting, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    tls.get_mut().set_tick(Some(Duration::from_millis(500)));
+    let r = wait_pinned_start_inner(tls, deadline);
+    tls.get_mut().set_tick(None);
+    r
+}
+
+fn wait_pinned_start_inner(tls: &mut TlsStream, deadline: Instant) -> Result<PhoneGreeting, String> {
+    let mut dec = FrameDecoder::new();
+    let mut pending = std::collections::VecDeque::new();
+    loop {
+        if Instant::now() > deadline {
+            return Err("your phone did not confirm this PC; open the app and pair again".into());
+        }
+        match next_frame(tls, &mut dec, &mut pending) {
+            Ok(Some(m)) if m.channel == CH_CONTROL => {
+                if m.payload.is_empty() {
+                    echo_keepalive(tls);
+                    continue;
+                }
+                let greeting = classify_phone_greeting(&String::from_utf8_lossy(&m.payload));
+                match greeting {
+                    PhoneGreeting::Other => continue,
+                    other => return Ok(other),
+                }
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                return Err("your phone closed the link before confirming this PC; pair again".into())
+            }
+            Err(e) if is_read_tick(&e) => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 // ------------------------------------------------------------------------- bench
@@ -629,6 +819,85 @@ mod tests {
         let s = r.render("unit-test");
         assert!(s.contains("p50"));
         assert!(s.contains("42.50"));
+    }
+
+    #[test]
+    fn phone_greeting_decides_trust_pair_and_refusal() {
+        // B-116(a): a local pin is not enough; these are the phone's opening answers.
+        assert_eq!(classify_phone_greeting("trusted"), PhoneGreeting::Trusted);
+        assert_eq!(
+            classify_phone_greeting("pair 927361"),
+            PhoneGreeting::Pair("927361".into())
+        );
+        assert_eq!(
+            classify_phone_greeting("  refused desktop-live \n"),
+            PhoneGreeting::Refused("desktop-live".into())
+        );
+        assert_eq!(classify_phone_greeting("video-on"), PhoneGreeting::Other);
+        assert_eq!(classify_phone_greeting(""), PhoneGreeting::Other);
+    }
+
+    #[test]
+    fn unpinned_start_classifies_all_four_greetings() {
+        // B-126: Trusted -> re-prompt (NOT silent acceptance), Pair -> phone's code,
+        // Refused -> plain mapping, Other -> the timeout message.
+        assert_eq!(
+            classify_unpinned_start(PhoneGreeting::Trusted),
+            UnpinnedStart::RepromptForTrusted
+        );
+        assert_eq!(
+            classify_unpinned_start(PhoneGreeting::Pair("927361".into())),
+            UnpinnedStart::PairWithPhoneCode("927361".into())
+        );
+        assert_eq!(
+            classify_unpinned_start(PhoneGreeting::Refused("desktop-live".into())),
+            UnpinnedStart::Refuse(
+                "Your phone is already showing a desktop to another PC. Stop the desktop on the phone, then try again.".into()
+            )
+        );
+        assert_eq!(
+            classify_unpinned_start(PhoneGreeting::Refused("nope".into())),
+            UnpinnedStart::Refuse("Your phone does not trust this PC any more - pair again".into())
+        );
+        assert_eq!(
+            classify_unpinned_start(PhoneGreeting::Other),
+            UnpinnedStart::Refuse("your phone did not confirm this PC; open the app and pair again".into())
+        );
+    }
+
+    #[test]
+    fn trusted_greeting_maps_to_reprompt_not_silent_acceptance() {
+        // B-126 regression guard: a Trusted greeting must NOT silently reconnect a PC that
+        // forgot the phone; it must ask the phone to re-pair visibly.
+        assert!(matches!(
+            classify_unpinned_start(PhoneGreeting::Trusted),
+            UnpinnedStart::RepromptForTrusted
+        ));
+    }
+
+    #[test]
+    fn reconnect_backoff_starts_fast_then_caps_at_ten_seconds() {
+        // B-116(b): 0.5, 1, 2, 4, 8, 10, 10 ... seconds.
+        assert_eq!(reconnect_delay_ms(0), 500);
+        assert_eq!(reconnect_delay_ms(1), 1_000);
+        assert_eq!(reconnect_delay_ms(2), 2_000);
+        assert_eq!(reconnect_delay_ms(3), 4_000);
+        assert_eq!(reconnect_delay_ms(4), 8_000);
+        assert_eq!(reconnect_delay_ms(5), 10_000);
+        assert_eq!(reconnect_delay_ms(50), 10_000);
+    }
+
+    #[test]
+    fn terminal_connect_errors_stop_the_loop_but_network_errors_retry() {
+        assert!(terminal_connect_error(
+            "Your phone does not trust this PC any more - pair again"
+        ));
+        assert!(terminal_connect_error(
+            "Your phone is already showing a desktop to another PC. Stop the desktop on the phone, then try again."
+        ));
+        assert!(terminal_connect_error("phone answered No; nothing was stored"));
+        assert!(!terminal_connect_error("connect: connection refused"));
+        assert!(!terminal_connect_error("tls handshake: timed out"));
     }
 
     #[test]

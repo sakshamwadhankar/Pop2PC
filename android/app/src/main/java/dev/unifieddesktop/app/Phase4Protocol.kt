@@ -97,6 +97,17 @@ object Phase4Protocol {
     }
 
     /**
+     * B-115: the channel gate alone is not enough. A non-empty control frame can start
+     * video (`video-on`) or resize the desktop (`display`), so until the PC is trusted only
+     * the pairing exchange and the empty keep-alive may pass. Pure so the security rule is
+     * unit-tested; the session loop calls it before `Phase5Session.onControlMessage`.
+     */
+    fun mayProcessControl(payload: ByteArray, gate: Gate): Boolean = when (gate) {
+        Gate.PAIRED -> true
+        Gate.PAIRING, Gate.UNPAIRED -> payload.isEmpty()
+    }
+
+    /**
      * Watchdog predicate: a session armed for the dead-link rule is expired when nothing
      * has come in for [DEAD_TIMEOUT_MS]. Pure function so it is unit-testable (the
      * supervisor thread that calls it lives in Phase4LinkService).

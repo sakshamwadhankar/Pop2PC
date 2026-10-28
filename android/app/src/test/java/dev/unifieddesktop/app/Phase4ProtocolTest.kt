@@ -153,6 +153,23 @@ class Phase4ProtocolTest {
         }
     }
 
+    /**
+     * B-115: CH_CONTROL is not a free pass. Before Yes, `video-on` and `display` must be
+     * refused; the empty keep-alive may still be echoed. After Yes every control line passes.
+     */
+    @Test
+    fun controlGateRefusesDesktopControlsUntilPaired() {
+        val videoOn = "video-on".toByteArray()
+        val display = "display 1728 1080".toByteArray()
+        for (gate in listOf(Phase4Protocol.Gate.UNPAIRED, Phase4Protocol.Gate.PAIRING)) {
+            assertFalse("video-on before Yes ($gate)", P.mayProcessControl(videoOn, gate))
+            assertFalse("display before Yes ($gate)", P.mayProcessControl(display, gate))
+            assertTrue("empty keep-alive ($gate)", P.mayProcessControl(ByteArray(0), gate))
+        }
+        assertTrue("video-on after Yes", P.mayProcessControl(videoOn, Phase4Protocol.Gate.PAIRED))
+        assertTrue("display after Yes", P.mayProcessControl(display, Phase4Protocol.Gate.PAIRED))
+    }
+
     // ---- dead-link watchdog (manager review 2026-10-18): pure predicate, tested. ----
 
     /** Inside the window nothing is closed (a healthy keep-alive gap stays open). */
