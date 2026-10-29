@@ -1,18 +1,24 @@
 package dev.unifieddesktop.app
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.Typeface
+import android.os.BatteryManager
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
@@ -39,6 +45,8 @@ class ShellRoot(
         const val TAG = "Phase6"
         const val TASKBAR_H = Theme.TASKBAR_H
         const val TITLE_H = Theme.TITLE_H
+        /** Size of the corner square [flashFrame] dirties: enough to ask for a frame, no more. */
+        const val FLASH_PROBE_PX = 8
     }
 
     val model = ShellModel(desktopW, desktopH, TASKBAR_H)
@@ -52,6 +60,114 @@ class ShellRoot(
     private val startMenu = StartMenuView(context)
     private val contextMenu = DesktopContextMenu(context)
     private val frames = HashMap<Int, ShellWindowView>()
+
+    /** D12: one toast view above every window; 2 s auto-hide, latest message wins. */
+    private val toastView = TextView(context).apply {
+        visibility = GONE
+        setTextColor(Theme.TEXT)
+        Theme.px(this, Theme.SMALL)
+        setPadding(18, 8, 18, 8)
+        background = shellRounded(Theme.alpha(Theme.SURFACE_RAISED, 245), Theme.BORDER, 8f)
+        gravity = Gravity.CENTER
+        maxLines = 2
+        ellipsize = android.text.TextUtils.TruncateAt.END
+    }
+    private var toastHide: Runnable? = null
+    private var lastBatteryPct = 100
+    private var batteryLowShown = false
+
+    /** D14: the one-time welcome card with three removable shortcuts. */
+    private val welcomeCard = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(14, 10, 14, 12)
+        background = shellRounded(Theme.alpha(Theme.SURFACE_RAISED, 245), Theme.BORDER, 10f)
+        visibility = GONE
+    }
+    private val welcomeRows = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+    /**
+     * T-005/T-006: a confirmation/name modal drawn by the desktop itself. The Files delete
+     * confirmation used `AlertDialog` with the private display's view context, which threw
+     * `BadTokenException: token null is not valid`, killed the UI thread and froze the whole
+     * desktop (tester T-005). A system dialog also lands on the phone screen, not the PC
+     * desktop. This panel is an ordinary child of the shell, so it needs no window token.
+     */
+    private val modalPanel = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(18, 14, 18, 14)
+        background = shellRounded(Theme.alpha(Theme.SURFACE_RAISED, 250), Theme.BORDER, 10f)
+        visibility = GONE
+        isClickable = true
+        elevation = 12f
+    }
+    private val modalTitle = TextView(context).apply {
+        setTextColor(Theme.TEXT)
+        Theme.px(this, Theme.HEADING)
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val modalMessage = TextView(context).apply {
+        setTextColor(Theme.TEXT_SECONDARY)
+        Theme.px(this, Theme.SMALL)
+        setPadding(0, 6, 0, 10)
+    }
+    private val modalField = EditText(context).apply {
+        setTextColor(Theme.TEXT)
+        setHintTextColor(Theme.TEXT_DIM)
+        Theme.px(this, Theme.BODY)
+        setBackground(shellRounded(Theme.SURFACE_SUNKEN, Theme.BORDER, 6f))
+        setPadding(10, 6, 10, 6)
+        visibility = GONE
+        isSingleLine = true
+        // The PC keyboard is the only input here; never raise the phone's soft keyboard.
+        showSoftInputOnFocus = false
+        imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+    }
+    private val modalButtons = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.END
+    }
+    private val modalCancelBtn = TextView(context).apply {
+        text = "Cancel"
+        setTextColor(Theme.TEXT_SECONDARY)
+        Theme.px(this, Theme.SMALL)
+        setPadding(14, 7, 14, 7)
+        isClickable = true
+        background = shellRounded(Theme.SURFACE_SUNKEN, Theme.BORDER, 6f)
+        setOnClickListener { dismissModal() }
+    }
+    private val modalOkBtn = TextView(context).apply {
+        setTextColor(Color.WHITE)
+        Theme.px(this, Theme.SMALL)
+        setPadding(16, 7, 16, 7)
+        isClickable = true
+        background = shellRounded(Theme.ACCENT, Theme.BORDER, 6f)
+        setOnClickListener { submitModal() }
+    }
+    private var modalYes: (() -> Unit)? = null
+    private var modalCancelled: (() -> Unit)? = null
+
+    /** D12: phone battery low, once per desktop session, only while discharging. */
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            val charging = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1) in listOf(
+                BatteryManager.BATTERY_STATUS_CHARGING,
+                BatteryManager.BATTERY_STATUS_FULL,
+            )
+            if (level < 0 || scale <= 0) return
+            val pct = (level * 100 / scale).coerceIn(0, 100)
+            lastBatteryPct = pct
+            if (!charging && pct <= 20 && !batteryLowShown) {
+                batteryLowShown = true
+                toast(Toasts.batteryLow(pct))
+            }
+        }
+    }
 
     /** Remembered window rectangles, per app (UX_AUDIT D5), in the shell's own preferences. */
     private val prefs by lazy { context.getSharedPreferences("shell", Context.MODE_PRIVATE) }
@@ -79,8 +195,12 @@ class ShellRoot(
         }
 
         fun flash() {
-            if (!armed) return
+            if (!armed) {
+                P7Log.say(context, "P5PROBE chip flash SKIPPED (armed=false)")
+                return
+            }
             count++
+            P7Log.say(context, "P5PROBE chip flash count=$count")
             untilMs = SystemClock.uptimeMillis() + 120
             invalidate()
         }
@@ -90,6 +210,7 @@ class ShellRoot(
             c.drawColor(if (flashing) Color.WHITE else Color.rgb(45, 45, 60))
             if (flashing && reported != count) {
                 reported = count
+                P7Log.say(context, "P5PROBE chip drawn count=$count")
                 onDrawn?.invoke(count, System.nanoTime())
             }
         }
@@ -124,10 +245,42 @@ class ShellRoot(
         addView(taskbar)
         addView(startMenu)
         addView(contextMenu)
+        buildWelcomeCard()
+        addView(welcomeCard, LayoutParams(470, LayoutParams.WRAP_CONTENT).apply {
+            leftMargin = 24
+            topMargin = 24
+        })
+        toastView.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            topMargin = 16
+        }
+        addView(toastView)
+        modalPanel.addView(modalTitle, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        modalPanel.addView(modalMessage, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        modalPanel.addView(modalField, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = 2 })
+        modalButtons.addView(modalCancelBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { marginEnd = 8 })
+        modalButtons.addView(modalOkBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        modalPanel.addView(modalButtons, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = 8 })
+        addView(modalPanel, LayoutParams(420, LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.CENTER })
         addView(probeChip)
         addView(cursorView)
         startMenu.visibility = GONE
         contextMenu.visibility = GONE
+        runCatching {
+            context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.onFailure { P7Log.say(context, "D12 battery receiver failed: ${it.javaClass.simpleName}") }
         contextMenu.onPick = { id ->
             when (id) {
                 "appcenter" -> openApp(App.APPCENTER)
@@ -144,6 +297,169 @@ class ShellRoot(
         startMenu.onLaunch = { app -> openApp(app); closeStartMenu() }
         startMenu.onLaunchInstalled = { id -> openCatalogApp(id); closeStartMenu() }
         SettingsDispatch.onWallpaperPick = { i -> setWallpaper(i) }
+    }
+
+    /**
+     * T-005/T-006: ask the user to confirm an action. The callback runs only on "yes";
+     * Cancel, Esc, a click outside or a right-click closes it with nothing done.
+     */
+    fun confirm(title: String, message: String, yesLabel: String, onYes: () -> Unit) {
+        openModal(title, message, "", yesLabel, false, onYes, null)
+    }
+
+    /** T-006: ask for a name (folder create / rename) with the PC keyboard. */
+    fun prompt(
+        title: String,
+        initial: String,
+        yesLabel: String,
+        onCancel: (() -> Unit)? = null,
+        onYes: (String) -> Unit,
+    ) {
+        openModal(title, null, initial, yesLabel, true, { onYes(modalField.text.toString()) }, onCancel)
+    }
+
+    fun modalOpen(): Boolean = modalPanel.visibility == View.VISIBLE
+
+    fun dismissModal() {
+        if (!modalOpen()) return
+        modalPanel.visibility = View.GONE
+        modalField.visibility = View.GONE
+        modalYes = null
+        val cancel = modalCancelled
+        modalCancelled = null
+        invalidate()
+        cancel?.invoke()
+    }
+
+    private fun submitModal() {
+        val yes = modalYes ?: return
+        modalYes = null
+        modalCancelled = null
+        modalPanel.visibility = View.GONE
+        modalField.visibility = View.GONE
+        invalidate()
+        yes()
+    }
+
+    private fun openModal(
+        title: String,
+        message: String?,
+        initial: String,
+        yesLabel: String,
+        withField: Boolean,
+        onYes: () -> Unit,
+        onCancel: (() -> Unit)?,
+    ) {
+        hideContextMenu()
+        if (startMenuOpen()) closeStartMenu()
+        modalTitle.text = title
+        modalMessage.text = message ?: ""
+        modalMessage.visibility = if (message.isNullOrEmpty()) View.GONE else View.VISIBLE
+        modalField.visibility = if (withField) View.VISIBLE else View.GONE
+        modalField.setText(initial)
+        modalOkBtn.text = yesLabel
+        modalYes = onYes
+        modalCancelled = onCancel
+        modalPanel.visibility = View.VISIBLE
+        modalPanel.bringToFront()
+        probeChip.bringToFront()
+        cursorView.bringToFront()
+        if (withField) {
+            modalField.requestFocus()
+            modalField.setSelection(modalField.text.length)
+        }
+        requestLayout()
+        invalidate()
+        P7Log.say(context, "P7SHELL modal \"$title\" field=$withField")
+    }
+
+    /** D12: show one line above every window for [ms], replacing the previous toast. */
+    fun toast(text: String, ms: Long = 2000) {
+        post {
+            toastView.text = text
+            toastView.visibility = VISIBLE
+            toastView.bringToFront()
+            cursorView.bringToFront()
+            toastHide?.let { removeCallbacks(it) }
+            val hide = Runnable { toastView.visibility = GONE }
+            toastHide = hide
+            postDelayed(hide, ms)
+            P7Log.say(context, "D12 toast \"$text\"")
+        }
+    }
+
+    /** D14: build the one-time card; shortcuts are removable one by one. */
+    private fun buildWelcomeCard() {
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(context).apply {
+            text = "Welcome"
+            setTextColor(Theme.TEXT)
+            Theme.px(this, Theme.HEADING)
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(TextView(context).apply {
+            text = "×"
+            setTextColor(Theme.TEXT_DIM)
+            Theme.px(this, Theme.HEADING)
+            gravity = Gravity.CENTER
+            setPadding(12, 0, 4, 4)
+            setOnClickListener { dismissWelcome() }
+        }, LinearLayout.LayoutParams(36, 36))
+        welcomeCard.addView(header)
+        welcomeCard.addView(TextView(context).apply {
+            text = "Open apps from Start. Press Exit to get your PC back."
+            setTextColor(Theme.TEXT_SECONDARY)
+            Theme.px(this, Theme.SMALL)
+            setPadding(0, 2, 0, 8)
+        })
+        welcomeCard.addView(welcomeRows)
+        welcomeCard.addView(TextView(context).apply {
+            text = "Long-press a shortcut to remove it."
+            setTextColor(Theme.TEXT_DIM)
+            Theme.px(this, Theme.CAPTION)
+            setPadding(0, 8, 0, 0)
+        })
+        refreshWelcomeShortcuts()
+        welcomeCard.visibility = if (prefs.getBoolean("welcome_done", false)) GONE else VISIBLE
+    }
+
+    private fun refreshWelcomeShortcuts() {
+        welcomeRows.removeAllViews()
+        val removed = prefs.getStringSet("welcome_removed", emptySet())?.toSet() ?: emptySet()
+        for (sc in DesktopShortcuts.visible(removed)) {
+            welcomeRows.addView(TextView(context).apply {
+                text = sc.label
+                setTextColor(Theme.TEXT)
+                Theme.px(this, Theme.SMALL)
+                gravity = Gravity.CENTER
+                background = shellRounded(Theme.SURFACE_SUNKEN, Theme.BORDER, 8f)
+                setOnClickListener {
+                    runCatching { openApp(App.valueOf(sc.app)) }
+                }
+                setOnLongClickListener {
+                    val next = DesktopShortcuts.remove(removed, sc.id)
+                    prefs.edit().putStringSet("welcome_removed", next).apply()
+                    refreshWelcomeShortcuts()
+                    toast(Toasts.SHORTCUT_REMOVED)
+                    true
+                }
+            }, LinearLayout.LayoutParams(104, 34).apply { marginEnd = 6 })
+        }
+        if (welcomeRows.childCount == 0) {
+            welcomeRows.addView(TextView(context).apply {
+                text = "All shortcuts removed"
+                setTextColor(Theme.TEXT_DIM)
+                Theme.px(this, Theme.SMALL)
+            })
+        }
+    }
+
+    private fun dismissWelcome() {
+        prefs.edit().putBoolean("welcome_done", true).apply()
+        welcomeCard.visibility = GONE
     }
 
     /** Change the desktop wallpaper (Settings or the desktop menu) and remember it. */
@@ -265,6 +581,17 @@ class ShellRoot(
             ?: return "no catalog app [$id]"
         val v = Catalog.pick(app) ?: return "no version for ${app.name}"
         if (!Catalog.isUsable(v)) return "Not yet: ${v.note.ifEmpty { v.rating }}"
+        // B-109: a Windows app with no record and no executable must not open an empty X11
+        // frame. The App Center then shows "Not installed - Install?" and the Install button
+        // is the action. The shipped Notepad++ portable counts as installed data.
+        if (v.kind == "windows") {
+            val portable = app.id == "notepadpp" && Phase2Wine.nppExe(context).isFile
+            val exe = Phase2Wine.installedExe(context, app.id) != null
+            if (AppLaunch.needsInstall(app.id, Installed.version(context, app.id), exe, portable)) {
+                P7Log.say(context, "APPCTR open ${app.id}: not installed")
+                return AppLaunch.NOT_INSTALLED
+            }
+        }
         return applyTarget(OpenRoute.of(app, v))
     }
 
@@ -279,8 +606,20 @@ class ShellRoot(
         "vscode" -> { openApp(App.VSCODE); "opened VS Code" }
         "x11" -> {
             openApp(App.X11, title = t.title)
-            Thread { Phase2Wine.openCatalogApp(context, t.catalogId) }.start()
-            "opened ${t.title}"
+            val name = AppLaunch.appName(t.title)
+            // B-109: a cold Wine boot takes seconds; report "Starting ..." until the X11
+            // window really maps, instead of claiming the app opened immediately.
+            Thread {
+                Phase2Wine.openCatalogApp(context, t.catalogId)
+                val mapped = Phase2X11.waitForCatalogWindow(context, t.catalogId, 45_000)
+                P7Log.say(context, "APPCTR map id=${t.catalogId} mapped=$mapped")
+                appCenter?.post {
+                    appCenter?.setStatus(
+                        if (mapped) AppLaunch.ready(name) else "Still starting $name... (Wine boot)",
+                    )
+                }
+            }.start()
+            AppLaunch.starting(name)
         }
         "android" -> {
             if (t.guest.isEmpty()) "no package name"
@@ -305,15 +644,46 @@ class ShellRoot(
     /** Latency-probe hook: the Test window's flash reports its draw time (Phase-5 method). */
     private var flashListener: ((Int, Long) -> Unit)? = null
 
+    /**
+     * B-122: the flash time of the desktop frame carrying a key-down. In shell mode the only
+     * draw source used to be the harness probe chip (armed by hand), so a key typed into a
+     * real window (Browser, VS Code, Notepad++) never reported a draw time and the latency
+     * probe never fired. This asks for one shell frame on key-down and reports when that
+     * frame is composed; it draws no extra pixels, so the UI is unchanged.
+     *
+     * The frame is asked for with an 8x8 corner invalidate, not `invalidate()`: the whole
+     * surface used to be re-composed for every key, which is paint work no key needs
+     * (Phase 12 round 4, Test-shell gate). A view invalidated on itself still re-records and
+     * still runs `dispatchDraw`, so the probe timestamp is unaffected.
+     */
+    private var flashPending = false
+    private var flashSeq = 0
+
+    fun flashFrame() {
+        flashSeq++
+        flashPending = true
+        invalidate(0, 0, FLASH_PROBE_PX, FLASH_PROBE_PX)
+    }
+
+    override fun dispatchDraw(canvas: Canvas) {
+        super.dispatchDraw(canvas)
+        if (flashPending) {
+            flashPending = false
+            flashListener?.invoke(flashSeq, System.nanoTime())
+        }
+    }
+
     fun setFlashListener(l: ((Int, Long) -> Unit)?) {
         flashListener = l
         testContent?.setFlashListener(l)
         probeChip.onDrawn = l
+        P7Log.say(context, "P5PROBE listener wired test=${testContent != null} chip=${probeChip.armed} shell=true")
     }
 
     /** Harness: arm/disarm the typing-probe square (see [probeChip]). */
     fun probeArm(on: Boolean): String {
         probeChip.arm(on)
+        P7Log.say(context, "P5PROBE chip arm on=$on")
         return "probe=${if (on) "on" else "off"} chip=bottom-right-28px"
     }
 
@@ -347,6 +717,8 @@ class ShellRoot(
 
     override fun onDetachedFromWindow() {
         persistWindows()
+        runCatching { context.unregisterReceiver(batteryReceiver) }
+        toastHide?.let { removeCallbacks(it) }
         super.onDetachedFromWindow()
     }
 
@@ -395,6 +767,9 @@ class ShellRoot(
         taskbar.bringToFront()
         if (startMenu.visibility == View.VISIBLE) startMenu.bringToFront()
         if (contextMenu.visibility == View.VISIBLE) contextMenu.bringToFront()
+        if (welcomeCard.visibility == View.VISIBLE) welcomeCard.bringToFront()
+        if (toastView.visibility == View.VISIBLE) toastView.bringToFront()
+        if (modalPanel.visibility == View.VISIBLE) modalPanel.bringToFront()
         probeChip.bringToFront()
         cursorView.bringToFront()
         taskbar.buttons = model.taskbar()
@@ -548,6 +923,22 @@ class ShellRoot(
      * (taskbar, start menu, window frame, window content) gets it.
      */
     fun mouseButton(button: Int, down: Boolean, x: Int, y: Int) {
+        // T-005: a modal above every window swallows all clicks. A press outside it is
+        // "cancel"; presses inside reach the buttons through normal hit-testing.
+        if (modalOpen()) {
+            if (down && button != Phase5Protocol.BTN_LEFT) {
+                dismissModal()
+                return
+            }
+            if (down && button == Phase5Protocol.BTN_LEFT) {
+                val inside = x >= modalPanel.left && x < modalPanel.right &&
+                    y >= modalPanel.top && y < modalPanel.bottom
+                if (!inside) {
+                    dismissModal()
+                    return
+                }
+            }
+        }
         if (down) {
             heldButtons.add(button)
             buttonsAllTime++
@@ -649,6 +1040,27 @@ class ShellRoot(
      */
     fun key(down: Boolean, keyCode: Int, scan: Int, meta: Int): Boolean {
         if (keyCode == 0) return false
+        // T-005/T-006: the modal owns the keyboard while it is up. Esc cancels, Enter
+        // submits, and a name field receives the real key events (PC keyboard only).
+        if (modalOpen()) {
+            if (down && keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                dismissModal()
+                return true
+            }
+            if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if (down) submitModal()
+                return true
+            }
+            if (modalField.visibility == View.VISIBLE) {
+                val now = SystemClock.uptimeMillis()
+                val ev = KeyEvent(
+                    now, now, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
+                    keyCode, 0, meta, -1, scan, 0, android.view.InputDevice.SOURCE_KEYBOARD,
+                )
+                return modalField.dispatchKeyEvent(ev)
+            }
+            return true
+        }
         // The Windows key opens the start menu from the PC keyboard (D3).
         if (down && (keyCode == KeyEvent.KEYCODE_META_LEFT || keyCode == KeyEvent.KEYCODE_META_RIGHT)) {
             toggleStartMenu()
@@ -673,6 +1085,7 @@ class ShellRoot(
         if (down) {
             keyFlashes++
             probeChip.flash()
+            flashFrame()
         }
         val handled = frame.keyToContent(down, keyCode, scan, meta)
         if (down) P7Log.say(context, "P6SHELL key code=$keyCode meta=$meta focused=${frame.win.title} handled=$handled")

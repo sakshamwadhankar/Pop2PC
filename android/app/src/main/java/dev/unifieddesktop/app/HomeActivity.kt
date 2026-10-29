@@ -77,6 +77,22 @@ class HomeActivity : Activity() {
         build()
         maybeAskNotifications()
         showHome()
+        registerBackHandling()
+    }
+
+    /**
+     * T-004: on Android 13+ (the app targets 36) a back gesture goes to the predictive-back
+     * dispatcher and never calls `onBackPressed`, so Settings -> Back closed the app. The
+     * callback keeps the legacy override below for API 29-32.
+     */
+    private fun registerBackHandling() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            ) {
+                if (showingSettings) showHome() else finish()
+            }
+        }
     }
 
     // ------------------------------------------------------------------ window
@@ -727,6 +743,17 @@ class HomeActivity : Activity() {
         (content.parent as? ScrollView)?.scrollTo(0, 0)
         refreshConnection()
         refreshSetup(homeSetup)
+    }
+
+    /** T-004: Back from Settings returns to the home page instead of closing the app. */
+    @android.annotation.SuppressLint("GestureBackNavigation")
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (showingSettings) {
+            showHome()
+            return
+        }
+        super.onBackPressed()
     }
 
     // ------------------------------------------------------------------ lifecycle

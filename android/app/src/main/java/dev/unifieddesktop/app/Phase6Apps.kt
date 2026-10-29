@@ -102,6 +102,8 @@ class FilesView(context: Context) : LinearLayout(context) {
     }
     private var pickMode = false
     private var onPick: ((File) -> Unit)? = null
+    private var lastTapName: String? = null
+    private var lastTapAt = 0L
     private val pickHint = TextView(context).apply {
         setTextColor(Theme.TEXT)
         Theme.px(this, Theme.CAPTION)
@@ -133,7 +135,7 @@ class FilesView(context: Context) : LinearLayout(context) {
             orientation = HORIZONTAL
             setPadding(4, 3, 4, 3)
             addView(DeskIconButton(context, DeskIcon.UP, "Up") { goUp() }, LayoutParams(34, 30))
-            addView(DeskIconButton(context, DeskIcon.PLUS, "New folder") { newFolder() }, LayoutParams(34, 30))
+            addView(DeskIconButton(context, DeskIcon.PLUS, "New folder") { newFolderPrompt() }, LayoutParams(34, 30))
             addView(DeskIconButton(context, DeskIcon.PENCIL, "Rename") { renameSelectedPrompt() }, LayoutParams(34, 30))
             addView(DeskIconButton(context, DeskIcon.TRASH, "Delete") { deleteSelected() }, LayoutParams(34, 30))
             addView(DeskIconButton(context, DeskIcon.SEND, "Send to PC") {
@@ -239,10 +241,25 @@ class FilesView(context: Context) : LinearLayout(context) {
                     ))
                 }
                 setOnClickListener {
+                    // T-006: a single click selects a folder (so it can be renamed or
+                    // deleted); a double click opens it. Before this, a folder could never
+                    // be selected from the PC and always navigated away.
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val doubleTap = f.name == lastTapName && now - lastTapAt < 450
+                    lastTapName = f.name
+                    lastTapAt = now
                     if (f.isDirectory) {
-                        dir = f
-                        selected = null
-                        refresh()
+                        if (doubleTap) {
+                            dir = f
+                            selected = null
+                            lastTapName = null
+                            refresh()
+                            say("opened ${f.name}")
+                        } else {
+                            selected = f
+                            refresh()
+                            say("selected ${f.name} (double-click to open)")
+                        }
                     } else if (pickMode) {
                         if (!f.name.lowercase().endsWith(".exe")) {
                             say("Choose a .exe file")
@@ -279,40 +296,98 @@ class FilesView(context: Context) : LinearLayout(context) {
     }
 
     fun newFolder() {
-        var i = 1
-        var f = File(dir, "New folder")
-        while (f.exists()) { i++; f = File(dir, "New folder $i") }
-        if (f.mkdirs()) { selected = null; refresh(); say("created ${f.name}") } else say("could not create folder")
+        newFolderNamed(uniqueFolderName())
     }
+
+    /** T-006: the toolbar asks for a name instead of silently creating "New folder". */
+    fun newFolderPrompt() {
+        val sh = shell()
+        if (sh == null) {
+            say("could not show the name prompt")
+            return
+        }
+        sh.prompt("New folder", uniqueFolderName(), "Create") { name ->
+            if (!newFolderNamed(name)) sh.toast("Could not create folder")
+        }
+    }
+
+    private fun uniqueFolderName(): String =
+        FileNames.uniqueFolder(dir.listFiles()?.map { it.name }?.toSet() ?: emptySet())
+
+    fun newFolderNamed(name: String): Boolean {
+        val n = cleanName(name)
+        if (n == null) { say("invalid folder name"); return false }
+        val f = File(dir, n)
+        if (f.exists()) { say("already exists: $n"); return false }
+        if (!f.mkdirs()) { say("could not create folder $n"); return false }
+        selected = f
+        lastTapName = null
+        refresh()
+        say("created $n")
+        return true
+    }
+
+    /** One name rule for files and folders: no empty, dot-dot or path-separator names. */
+    private fun cleanName(raw: String): String? = FileNames.clean(raw)
 
     /** Rename the selected entry (used by the harness too: `p6rename <name>`). */
     fun renameSelected(newName: String): Boolean {
         val s = selected ?: return false
-        val target = File(dir, newName)
+        val n = cleanName(newName)
+        if (n == null) { say("invalid name"); return false }
+        if (n == s.name) { say("name unchanged"); return true }
+        val target = File(dir, n)
+        if (target.exists()) { say("already exists: $n"); return false }
         val ok = s.renameTo(target)
-        if (ok) { selected = target; refresh(); say("renamed to $newName") } else say("rename failed")
+        if (ok) { selected = target; lastTapName = null; refresh(); say("renamed to $n") } else say("rename failed")
         return ok
     }
 
+    /** T-006: the pencil asks for the new name; it never appends a suffix itself. */
     fun renameSelectedPrompt() {
         val s = selected ?: run { say("select an item first"); return }
-        renameSelected(s.name + "-renamed")
+        val sh = shell()
+        if (sh == null) {
+            say("could not show the name prompt")
+            return
+        }
+        sh.prompt("Rename", s.name, "Rename") { name ->
+            if (!renameSelected(name)) sh.toast("Rename failed")
+        }
     }
 
-    /** Delete with the confirmation dialog the design asks for. */
+    /** Delete with the desktop's own confirmation (no system dialog, no window token). */
     private fun deleteSelected() {
         val s = selected ?: run { say("select an item first"); return }
-        android.app.AlertDialog.Builder(context)
-            .setTitle("Delete")
-            .setMessage("Delete \"${s.name}\" permanently?")
-            .setPositiveButton("Delete") { _, _ ->
-                val ok = if (s.isDirectory) s.deleteRecursively() else s.delete()
-                selected = null
-                refresh()
-                say(if (ok) "deleted" else "delete failed")
+        val sh = shell()
+        if (sh == null) {
+            // Never delete without a confirmation and never fall back to AlertDialog,
+            // which cannot get a window token on this private display (tester T-005).
+            say("could not show the delete confirmation")
+            return
+        }
+        sh.confirm("Delete", "Delete \"${s.name}\" permanently?", "Delete") {
+            val ok = try {
+                if (s.isDirectory) s.deleteRecursively() else s.delete()
+            } catch (t: Throwable) {
+                say("delete failed: ${t.javaClass.simpleName}")
+                false
             }
-            .setNegativeButton("Cancel") { _, _ -> say("delete cancelled") }
-            .show()
+            selected = null
+            lastTapName = null
+            refresh()
+            say(if (ok) "deleted ${s.name}" else "delete failed")
+        }
+    }
+
+    /** Walk up to the desktop shell that hosts this window (same pattern as AppCenter). */
+    private fun shell(): ShellRoot? {
+        var p: android.view.ViewParent? = parent
+        while (p != null) {
+            if (p is ShellRoot) return p
+            p = p.parent
+        }
+        return null
     }
 }
 

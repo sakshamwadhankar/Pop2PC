@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Commands:
  *   p6:shell                  one state line (windows, focus, start menu, input counters)
- *   p6:probe [on|off]         arm the typing-probe square (latency probe for every window)
+ *   p6:probe-chip [on|off]    arm the typing-probe square (latency probe for every window)
  *   p6:open:<files|browser|settings|test>
  *   p6:menu                    toggle the start menu
  *   p6:close                   close the focused window
@@ -24,12 +24,21 @@ import java.util.concurrent.atomic.AtomicReference
  *   p6:rename:<name>           Files window: rename the selected entry
  *   p6:url:<url>               Browser: set the address bar and load
  *   p6:vscode[:folder]         VS Code window: log in to code-server, open the folder
- *   p6:probe:<text>            B-039 keyboard-route probe into the live page
+ *   p6:probe:<text>            B-039 keyboard-route probe into the live page (DOM probe)
  *   p6:keys                    the page's recorded keydown list (DOM probe)
  *   p6:key:<code>[:<meta>]     one PC key through the real shell key path (browser shortcuts)
  *   p6:settings                the Settings window's text
  *   p6:shot[:name]             draw the live desktop surface to filesDir/p6-<name>.png
  */
+/** B-113: the two probe commands must have distinct names; the old duplicate `probe` made
+ * the page-keyboard branch unreachable. Pure so a test can guard the names. */
+object ProbeCommands {
+    const val CHIP = "probe-chip"
+    const val PAGE = "probe"
+
+    fun chipOn(arg: String): Boolean = arg.trim().lowercase() != "off"
+}
+
 object Phase6Dispatch {
 
     private val main = Handler(Looper.getMainLooper())
@@ -64,7 +73,7 @@ object Phase6Dispatch {
             "shell" -> s.stats()
             // Phase 12 round 2: arm the typing-probe square so the latency probe works for
             // keys typed into any window (Browser, VS Code, Notepad++), not only Test.
-            "probe" -> s.probeArm(arg.trim().lowercase() != "off")
+            ProbeCommands.CHIP -> s.probeArm(ProbeCommands.chipOn(arg))
             // Phase 8 App Center driver: search/select/install/open/uninstall/exe. The sub-command
             // and its argument are split at the first ':' after "appcenter".
             "appcenter" -> {
@@ -203,7 +212,7 @@ object Phase6Dispatch {
                 b.ensureCodeServer(folder)
                 "vscode starting/loading folder=$folder"
             }
-            "probe" -> {
+            ProbeCommands.PAGE -> {
                 val b = browser(s)
                 val route = b.probeKeyboard(arg)
                 "probe route=$route payload=\"$arg\""
