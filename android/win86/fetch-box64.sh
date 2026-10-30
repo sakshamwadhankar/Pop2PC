@@ -49,7 +49,7 @@ CMAKE="${CMAKE_EXE:-$HOME/.local/bin/cmake}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 VENDOR="$ROOT/vendor"
 ARC="$VENDOR/box64-${REV}.tar.gz"
-OUT="$ROOT/../app/src/main/jniLibs/arm64-v8a/libbox64.so"
+OUT="${BOX64_OUT:-$ROOT/../app/src/main/jniLibs/arm64-v8a/libbox64.so}"
 
 # Compiling on the Windows-mounted tree (/mnt/c) is flaky (missing .d files) and
 # slow — LESSONS.md. Extract and build on the WSL filesystem, copy the result back.
@@ -608,6 +608,8 @@ cd "$BUILD"
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
   -DANDROID=ON -DARM64=1 -DNOGIT=1 \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
   "$SRC"
 
 "$CMAKE" --build . -j "$(nproc)"
@@ -634,6 +636,9 @@ echo "addrinfo converters present in dynsym"
 
 # box64 is an Android PIE executable; ship it as lib*.so (extracted to nativeLibraryDir).
 # Strip the shipped copy (22 MB vs 70 MB); keep the unstripped one in vendor/ for gdb.
+# 2026-10-23 T-003: every LOAD segment is linked with max-page-size=16384 (Play 16 KB
+# requirement). BOX64_OUT lets a candidate be built and checked without replacing the
+# phone-verified artifact before it has booted Wine on the phone.
 mkdir -p "$(dirname "$OUT")"
 cp -f "$BUILD/box64" "$OUT"
 STRIP="$NDK/toolchains/llvm/prebuilt/*/bin/llvm-strip"

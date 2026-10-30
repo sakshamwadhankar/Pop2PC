@@ -47,13 +47,14 @@ use windows::Win32::System::Registry::{
     REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
 };
 use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, CreateDesktopW, GetUserObjectInformationW, OpenDesktopW, OpenInputDesktop,
-    SetThreadDesktop, SwitchDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, HDESK,
-    UOI_NAME,
+    CloseDesktop, CreateDesktopW, GetThreadDesktop, GetUserObjectInformationW, OpenDesktopW,
+    OpenInputDesktop, SetThreadDesktop, SwitchDesktop, DESKTOP_ACCESS_FLAGS,
+    DESKTOP_CONTROL_FLAGS, HDESK, UOI_NAME,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, GetCurrentProcess, OpenEventW, OpenMutexW, OpenProcessToken,
-    ReleaseMutex, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE,
+    CreateEventW, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, OpenEventW, OpenMutexW,
+    OpenProcessToken, ReleaseMutex, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -722,13 +723,6 @@ static ENGAGED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub fn is_locked() -> bool {
     LOCK_ACTIVE.load(Ordering::SeqCst)
-}
-
-/// True from `Lock::prepare` until `Lock::exit`/`abort` completes: this process owns a
-/// private desktop, so the thread is no longer on Default and the normal focus rules do not
-/// apply.
-pub fn is_active() -> bool {
-    STATE.load(Ordering::SeqCst) != LockState::Normal.as_u8()
 }
 
 pub fn engaged_at() -> Option<Instant> {
@@ -1852,6 +1846,45 @@ pub fn cmd_recover() -> i32 {
     }
 }
 
+/// B-112: true when a thread/input desktop name was left by a dead lock session. Pure so
+/// the startup recovery decision is unit-tested; a live session must never be stolen.
+fn stale_desktop(thread_name: &str, input_name: &str, session_running: bool) -> bool {
+    !session_running
+        && (thread_name.starts_with(DESKTOP_PREFIX) || input_name.starts_with(DESKTOP_PREFIX))
+}
+
+/// B-112: the GUI is started by the user after a forced kill. If the previous lock left a
+/// `udreceiver-lock-*` desktop as the thread/input desktop, creating the GUI window or
+/// spawning the lock child fails with "The request is not supported." Recover the screen and
+/// move this thread to Default BEFORE any window exists. A live lock session is left alone.
+pub fn prepare_gui_thread() {
+    unsafe {
+        let thread_desk = GetThreadDesktop(GetCurrentThreadId()).unwrap_or_default();
+        let thread_name = desktop_name(thread_desk).unwrap_or_default();
+        let input_name = input_desktop_name().unwrap_or_default();
+        if stale_desktop(&thread_name, &input_name, lock_session_running()) {
+            if let Err(e) = ensure_default_input() {
+                eprintln!("[lock] GUI startup: SwitchDesktop(Default): {e}");
+            }
+            match open_default_desktop() {
+                Ok(d) => {
+                    if let Err(e) = SetThreadDesktop(d) {
+                        eprintln!("[lock] GUI startup: SetThreadDesktop(Default): {e}");
+                    }
+                    let _ = CloseDesktop(d);
+                }
+                Err(e) => eprintln!("[lock] GUI startup: {e}"),
+            }
+            println!(
+                "[lock] GUI startup recovered stale desktop thread='{thread_name}' \
+                 input='{input_name}'"
+            );
+        }
+    }
+    // Also finish a dirty journal/policy restore when no lock session owns it.
+    let _ = recover_if_dirty();
+}
+
 /// Called by `lock-recover` when it owns no session. It acquires the single-instance guard
 /// first, so it can never touch a live lock's journal or desktop; a live session makes it
 /// fail before the journal is read. `view` and `lock-selftest` acquire the guard themselves
@@ -2680,6 +2713,20 @@ mod tests {
             LockState::Locking.transition(LockState::Normal).unwrap(),
             LockState::Normal
         );
+    }
+
+    #[test]
+    fn b112_startup_recovers_only_a_dead_lock_desktop() {
+        // Forced kill leaves the private desktop as thread/input desktop; no session owns
+        // it, so the next GUI start must move back to Default before creating windows.
+        assert!(stale_desktop("udreceiver-lock-1234", "Default", false));
+        assert!(stale_desktop("Default", "udreceiver-lock-1234", false));
+        assert!(stale_desktop("udreceiver-lock-1234", "udreceiver-lock-1234", false));
+        // A live lock owns the mutex: never steal its desktop.
+        assert!(!stale_desktop("udreceiver-lock-1234", "udreceiver-lock-1234", true));
+        // Normal desktop is never touched.
+        assert!(!stale_desktop("Default", "Default", false));
+        assert!(!stale_desktop("Winlogon", "Default", false));
     }
 
     #[test]

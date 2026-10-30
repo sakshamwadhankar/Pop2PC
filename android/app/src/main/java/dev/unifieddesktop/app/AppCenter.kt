@@ -424,6 +424,12 @@ class AppCenterView(context: Context) : LinearLayout(context) {
         return "${Catalog.search(apps, q).size} rows: ${visibleNames()}"
     }
 
+    /** B-109: the shell reports when a cold Wine app finally maps its X11 window. */
+    fun setStatus(s: String) {
+        status.text = s
+        say("status $s")
+    }
+
     /** Harness: switch to the Installed tab and return its status line. */
     fun showInstalledTab(): String {
         setTab(1)

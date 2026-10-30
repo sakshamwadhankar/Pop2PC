@@ -97,6 +97,7 @@ object Phase4Dispatch {
                         }
                     }
                     "p12warm" -> Phase4Log.say(ctx, Phase12Preload.configure(arg))
+                    "p12nppwarm" -> Phase4Log.say(ctx, Phase12Preload.configureNpp(arg))
                     else -> Phase4Log.say(ctx, "PHASE4X unknown [$what]")
                 }
             } catch (t: Throwable) {

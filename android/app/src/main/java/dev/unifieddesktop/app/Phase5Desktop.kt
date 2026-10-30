@@ -409,10 +409,29 @@ private class SurfaceView5(context: Context) : View(context) {
     var onFlashDrawn: ((Int, Long) -> Unit)? = null
     private var reportedFlash = 0
 
+    /**
+     * A key-down only changes two small areas of this view: the flash square and the HUD line
+     * that counts the keys. Invalidating the whole view (the whole Test window) made every key
+     * a full-surface repaint for nothing (Phase 12 round 4, Test-shell gate).
+     */
     fun flash() {
         keyCount++
         flashUntilMs = SystemClock.uptimeMillis() + Phase5Desktop.FLASH_MS
-        invalidate()
+        invalidate(FLASH_L, FLASH_T, FLASH_R, FLASH_B)
+        invalidate(HUD_L, HUD_T, HUD_R, HUD_B)
+    }
+
+    companion object {
+        /** The flash square: `onDraw` paints it at (60,60)-(700,260). */
+        private const val FLASH_L = 58
+        private const val FLASH_T = 58
+        private const val FLASH_R = 702
+        private const val FLASH_B = 262
+        /** The two HUD text lines: baseline 1000 and 1040, textSize 26. */
+        private const val HUD_L = 56
+        private const val HUD_T = 968
+        private const val HUD_R = 1300
+        private const val HUD_B = 1050
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -472,7 +491,9 @@ private class SurfaceView5(context: Context) : View(context) {
         canvas.drawLine(cursorX, cursorY, cursorX + 22, cursorY + 30, paint)
         canvas.drawLine(cursorX, cursorY, cursorX - 10, cursorY + 30, paint)
 
-        // keep animating while the session is up (fps measurement needs motion)
-        if (isShown) postInvalidateOnAnimation()
+        // No self-invalidation: this window used to redraw at 60 fps forever for the fps test,
+        // which kept the encoder queue full and added ~200 ms to every key typed into a static
+        // field (Phase 12 round 3, B-122 follow-up). Motion for fps runs comes from the
+        // draggable box and the cursor, which invalidate on every pointer move.
     }
 }

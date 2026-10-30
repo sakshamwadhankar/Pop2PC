@@ -55,6 +55,21 @@ object Phase12Preload {
         else -> OFF
     }
 
+    /**
+     * Phase 12 round 4 candidate B1, measured with the harness so BEFORE and AFTER run on the
+     * same APK: after the Wine warm-up, start Notepad++ once and close it again. Off by
+     * default until the numbers say it helps.
+     */
+    @Volatile
+    private var nppWarm = false
+
+    fun configureNpp(spec: String): String {
+        nppWarm = spec.trim().lowercase() in setOf("1", "on", "true", "yes")
+        return "P12NPPWARM npp=$nppWarm"
+    }
+
+    fun nppPrewarmEnabled(): Boolean = nppWarm
+
     fun wineEnabled(): Boolean = mode == WINE || mode == BOTH
 
     fun codeEnabled(): Boolean = mode == CODE || mode == BOTH
@@ -115,6 +130,16 @@ object Phase12Preload {
                     "Phase12",
                     "P12PREWARM wine ok=$ok ms=${android.os.SystemClock.elapsedRealtime() - t0}"
                 )
+                // Phase 12 round 4 candidate B1: warm Notepad++ itself after the prefix, so the
+                // user's first click does not pay for its own start and paint.
+                if (ok && nppWarm) {
+                    val t1 = android.os.SystemClock.elapsedRealtime()
+                    val nppOk = Phase2Wine.prewarmNpp(app)
+                    android.util.Log.i(
+                        "Phase12",
+                        "P12NPPPREWARM done ok=$nppOk ms=${android.os.SystemClock.elapsedRealtime() - t1}"
+                    )
+                }
             }, "p12-warm-wine").start()
         }
         if (codeEnabled()) {

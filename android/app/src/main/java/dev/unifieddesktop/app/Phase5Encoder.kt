@@ -482,6 +482,9 @@ class Phase5Encoder(
             }
             drawCount.incrementAndGet()
             lastDrawNs = nowNs
+            // Phase 12 round 4 diagnosis: one line per GL draw, so the timeline of a key frame
+            // (view draw -> GL swap -> encoder output) can be read straight from logcat.
+            Log.i(TAG, "P5PROBE draw now=${nowNs / 1000} pend=$pending force=$force ts=${st.timestamp / 1000}")
         } catch (t: Throwable) {
             Log.e(TAG, "draw failed", t)
         }
@@ -545,6 +548,10 @@ class Phase5Encoder(
                             }
                         }
                         val mySeq = seq.incrementAndGet()
+                        Log.i(
+                            TAG,
+                            "P5PROBE out seq=$mySeq pts=${info.presentationTimeUs} now=${System.nanoTime() / 1000} key=$isKey",
+                        )
                         listener.onAccessUnit(
                             if (isKey) Phase5Protocol.VFLAG_KEYFRAME else 0,
                             mySeq, info.presentationTimeUs, System.nanoTime(), au

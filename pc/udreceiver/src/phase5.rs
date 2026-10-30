@@ -292,7 +292,9 @@ pub fn scale_to_desktop(px: i32, py: i32, client_w: i32, client_h: i32, dw: i32,
 
 /// A client pixel -> desktop pixel through the video letterbox (the same fit() the blit
 /// uses). B-064: this offsets the black bars, so a click aimed at a video pixel lands on
-/// that desktop pixel; unit-tested below.
+/// that desktop pixel; unit-tested below. Production code uses the D8 size-aware
+/// [`scale_client_to_desktop_for`].
+#[cfg(test)]
 pub fn scale_client_to_desktop(px: i32, py: i32, client_w: i32, client_h: i32) -> (i32, i32) {
     scale_client_to_desktop_for(px, py, client_w, client_h, DESKTOP_W, DESKTOP_H)
 }
@@ -330,8 +332,67 @@ pub fn desktop_for_client(cw: i32, ch: i32) -> (i32, i32) {
 }
 
 /// The size the 1920x1080 desktop is blitted to inside a client of `cw x ch`.
+/// Production code uses the D8 size-aware [`fit_video_for`].
+#[cfg(test)]
 pub fn fit_video(cw: i32, ch: i32) -> (i32, i32) {
     fit_video_for(cw, ch, DESKTOP_W, DESKTOP_H)
+}
+
+/// B-110: the visible part of a decoded frame. H.264 codes 16x16 macroblocks, so a
+/// 1728x1080 stream arrives as 1728x1088; the extra rows are padding. Crop the coded
+/// height to the desktop's aspect before fitting, exactly as the renderer does.
+pub fn visible_size_for(in_w: i32, in_h: i32, dw: i32, dh: i32) -> (i32, i32) {
+    let in_w = in_w.max(2);
+    let in_h = in_h.max(2);
+    let (dw, dh) = (dw.max(2), dh.max(2));
+    let aspect_h = ((in_w as f64 * dh as f64 / dw as f64).round() as i32).clamp(2, in_h);
+    (in_w, aspect_h)
+}
+
+/// B-110: the client rectangle the video is actually drawn into, from the same geometry
+/// as `blit_dxgi`: (left, top, width, height). Input must use this, not a full-window
+/// assumption, or a coded 1088-line frame at a 1080-line desktop puts every click ~56 px
+/// too high.
+pub fn video_rect_for(
+    client_w: i32,
+    client_h: i32,
+    in_w: i32,
+    in_h: i32,
+    dw: i32,
+    dh: i32,
+) -> (i32, i32, i32, i32) {
+    let (vis_w, vis_h) = visible_size_for(in_w, in_h, dw, dh);
+    let (rw, rh) = fit_video_for(client_w, client_h, vis_w, vis_h);
+    ((client_w - rw) / 2, (client_h - rh) / 2, rw, rh)
+}
+
+/// B-110: client pixel -> desktop pixel through the rectangle the decoder actually fills.
+/// `in_w`/`in_h` are the coded frame size (0 means "not known yet", then the D8 desktop
+/// aspect is used). Unit-tested with the 1728x1080 desktop and the old 1920x1080 case.
+#[allow(clippy::too_many_arguments)] // the six rectangles are the point of the pure mapping
+pub fn scale_client_to_desktop_with_video(
+    px: i32,
+    py: i32,
+    client_w: i32,
+    client_h: i32,
+    in_w: i32,
+    in_h: i32,
+    dw: i32,
+    dh: i32,
+) -> (i32, i32) {
+    if client_w <= 0 || client_h <= 0 || dw <= 0 || dh <= 0 {
+        return (0, 0);
+    }
+    if in_w <= 0 || in_h <= 0 {
+        return scale_client_to_desktop_for(px, py, client_w, client_h, dw, dh);
+    }
+    let (ox, oy, rw, rh) = video_rect_for(client_w, client_h, in_w, in_h, dw, dh);
+    if rw <= 0 || rh <= 0 {
+        return (0, 0);
+    }
+    let x = ((px - ox) as i64 * dw as i64 / rw as i64).clamp(0, dw as i64 - 1) as i32;
+    let y = ((py - oy) as i64 * dh as i64 / rh as i64).clamp(0, dh as i64 - 1) as i32;
+    (x, y)
 }
 
 /// Fit a desktop of `dw x dh` inside the client, keeping its aspect (D8).
@@ -608,6 +669,42 @@ mod tests {
         assert_eq!(scale_client_to_desktop(0, 0, 1536, 960), (0, 0));
         // exactly 1:1 when the client is the desktop size
         assert_eq!(scale_client_to_desktop(400, 128, 1920, 1080), (400, 128));
+    }
+
+    #[test]
+    fn b110_input_uses_the_rect_the_video_is_drawn_into() {
+        // D22 desktop 1728x1080, encoder 1296x810, client 1920x1200: the picture fills
+        // the window, so a click at 172,175 is desktop 154,157 (0.9x), not half.
+        assert_eq!(video_rect_for(1920, 1200, 1296, 810, 1728, 1080), (0, 0, 1920, 1200));
+        assert_eq!(
+            scale_client_to_desktop_with_video(172, 175, 1920, 1200, 1296, 810, 1728, 1080),
+            (154, 157)
+        );
+        // Old 1920x1080 desktop, coded 1920x1088: 60 px bars top/bottom. The same click
+        // is desktop 172,115, because y=175 is 115 px into the picture.
+        assert_eq!(video_rect_for(1920, 1200, 1920, 1088, 1920, 1080), (0, 60, 1920, 1080));
+        assert_eq!(
+            scale_client_to_desktop_with_video(172, 175, 1920, 1200, 1920, 1088, 1920, 1080),
+            (172, 115)
+        );
+        // The B-110 case that was logged: a coded 1920x1088 frame while the desktop is
+        // 1728x1080. The renderer crops to 1088 and centres it (56 px bars); input must
+        // follow that rect, not assume the full 1200-line window.
+        assert_eq!(video_rect_for(1920, 1200, 1920, 1088, 1728, 1080), (0, 56, 1920, 1088));
+        assert_eq!(
+            scale_client_to_desktop_with_video(172, 175, 1920, 1200, 1920, 1088, 1728, 1080),
+            (154, 118)
+        );
+        // Unknown coded size falls back to the D8 desktop aspect (pre-first-frame clicks).
+        assert_eq!(
+            scale_client_to_desktop_with_video(172, 175, 1920, 1200, 0, 0, 1728, 1080),
+            (154, 157)
+        );
+        // A click in a black bar clamps to the desktop edge instead of going negative.
+        assert_eq!(
+            scale_client_to_desktop_with_video(172, 20, 1920, 1200, 1920, 1088, 1920, 1080),
+            (172, 0)
+        );
     }
 
     #[test]

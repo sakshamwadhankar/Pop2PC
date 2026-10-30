@@ -1107,6 +1107,44 @@ object Phase2X11 {
     }
 
     /**
+     * B-109: did the catalog app's X11 window map yet? The App Center shows "Starting ..."
+     * until this is true, so a cold Wine boot is never reported as an immediate open.
+     */
+    fun catalogWindowMapped(ctx: Context, id: String): Boolean = try {
+        val want = when (id) {
+            "notepadpp" -> "notepad"
+            "sevenzip" -> "7-zip"
+            "minesweeper" -> "winemine"
+            "xeyes" -> "xeyes"
+            "xcalc" -> "xcalc"
+            "xmessage" -> "xmessage"
+            else -> id
+        }
+        val x = X11.connect()
+        try {
+            val atom = x.internAtom("WM_CLASS")
+            x.queryTree().any { win ->
+                val cls = x.getProperty8(win, atom)?.replace('\u0000', ' ')?.trim() ?: ""
+                cls.contains(want, ignoreCase = true)
+            }
+        } finally {
+            x.close()
+        }
+    } catch (t: Throwable) {
+        say("APPCTR map probe failed: $t")
+        false
+    }
+
+    fun waitForCatalogWindow(ctx: Context, id: String, timeoutMs: Long): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            if (catalogWindowMapped(ctx, id)) return true
+            try { Thread.sleep(250) } catch (_: InterruptedException) { return false }
+        }
+        return false
+    }
+
+    /**
      * B-063: there is no window manager, so a fresh Notepad++ (Wine) maps full-screen and
      * puts the later xeyes under it. Read the root's children, classify them by WM_CLASS and
      * place them with ConfigureWindow: Notepad++ left, xeyes right (raised). Unknown

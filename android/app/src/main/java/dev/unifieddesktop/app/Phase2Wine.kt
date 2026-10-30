@@ -1113,6 +1113,62 @@ object Phase2Wine {
         }
     }
 
+    /**
+     * Phase 12 round 4 candidate B1: start Notepad++ once after the Wine warm-up and close it
+     * again, so the user's first open finds its DLLs, fonts and resources already in the page
+     * cache. Safe guard: the pre-launch copy is only closed while it is the ONLY Notepad++
+     * process, so a real open that arrives meanwhile is never killed by this thread.
+     * Returns true when a window mapped and the pre-launch was cleaned up.
+     */
+    fun prewarmNpp(ctx: Context): Boolean {
+        val t0 = System.currentTimeMillis()
+        val exe = installedExe(ctx, "notepadpp")
+        if (exe == null) {
+            say("P12NPPPREWARM skip: not installed")
+            writeLog(ctx)
+            return false
+        }
+        val pid = startBin(ctx, loaderBin(ctx), waitForExit = false, exe.absolutePath)
+        say("P12NPPPREWARM start pid=$pid exe=${exe.name}")
+        var mapMs = -1L
+        val deadline = System.currentTimeMillis() + 30_000
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(500)
+            val r = Phase2X11.placeWindows()
+            val n = Regex("npp=(\\d+)").find(r)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            if (n > 0) {
+                mapMs = System.currentTimeMillis() - t0
+                break
+            }
+        }
+        // Let it paint once, so the warm-up covers the first drawing pass as well.
+        Thread.sleep(1_500)
+        val copies = nppProcessCount()
+        if (copies <= 1) {
+            closeCatalogApps(ctx)
+        } else {
+            say("P12NPPPREWARM keep: $copies Notepad++ copies running (a real open arrived)")
+        }
+        say("P12NPPPREWARM done map_ms=$mapMs total_ms=${System.currentTimeMillis() - t0} copies=$copies")
+        writeLog(ctx)
+        return mapMs >= 0
+    }
+
+    /** Notepad++ processes of our uid (the pre-launch guard). */
+    private fun nppProcessCount(): Int {
+        var n = 0
+        try {
+            val uid = android.os.Process.myUid()
+            File("/proc").listFiles { f -> f.name.all { it.isDigit() } }?.forEach { d ->
+                try {
+                    if (readUid(d) != uid) return@forEach
+                    if (catalogProcessId(cmdlineAll(d)) == "notepadpp") n++
+                } catch (_: Throwable) { }
+            }
+        } catch (_: Throwable) { }
+        return n
+    }
+
     /** Run one Windows tool under box64 + the shipped loader, returning its exit and output. */
     private fun runCaptured(
         ctx: Context,

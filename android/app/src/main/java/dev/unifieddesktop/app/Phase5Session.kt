@@ -99,6 +99,7 @@ class Phase5Session(
         @Volatile var tDispatchUs = 0L
         @Volatile var tDrawUs = 0L
         @Volatile var done = false
+        @Volatile var noDrawLogged = false
     }
     private val probe = AtomicReference<Probe?>(null)
 
@@ -207,6 +208,7 @@ class Phase5Session(
                 val p = probe.get()
                 if (p != null && p.tDrawUs == 0L) p.tDrawUs = ns / 1000
             }
+            say("P5PROBE flash listener wired (desktop up)")
         }
         say("P5 desktop up ${Phase5Desktop.W}x${Phase5Desktop.H} encoder=${enc.codecName} context=${if (resumed == null) "service" else "activity-or-service"} ($why)")
         Phase5Dispatch.bind(this)
@@ -374,6 +376,10 @@ class Phase5Session(
         // thread); the match can be one frame early if that frame's buffer was queued just
         // before the flash draw.
         val p = probe.get()
+        if (p != null && !p.done && p.tDrawUs == 0L && !p.noDrawLogged) {
+            p.noDrawLogged = true
+            say("P5PROBE video seq=$seq with tDrawUs=0 (no flash drawn yet)")
+        }
         if (p != null && !p.done && p.tDrawUs > 0 && ptsUs >= p.tDrawUs) {
             p.done = true
             sendLatency(p, encodeDoneNs / 1000, seq)
@@ -384,6 +390,7 @@ class Phase5Session(
     private fun sendLatency(p: Probe, tEncUs: Long, seq: Int) {
         val line = "lat ${p.tPcUs} ${p.tRecvUs} ${p.tDispatchUs} ${p.tDrawUs} $tEncUs $seq"
         writer.push(Phase4Protocol.Message.create(Phase4Protocol.CH_CONTROL, line.toByteArray()))
+        say("P5PROBE lat send seq=$seq tDrawUs=${p.tDrawUs}")
         say("P5 LAT $line")
     }
 
@@ -463,6 +470,7 @@ class Phase5Session(
                     if (e.down) {
                         val pr = Probe(e.tPcUs, tRecvUs)
                         probe.set(pr)
+                        say("P5PROBE keydown vk=${e.vk} probe armed")
                         main.post {
                             pr.tDispatchUs = System.nanoTime() / 1000
                             val handled = desktop?.key(true, Phase5Protocol.vkToKeycode(e.vk), e.scan, Phase5Protocol.modsToMetaState(e.mods)) ?: false
@@ -515,7 +523,9 @@ class Phase5Session(
         return true
     }
 
-    fun onControlMessage(text: String, gateOpen: Boolean = true) {
+    // B-115: CLOSED unless the caller proves the PC is paired. A default of `true` was the
+    // gate hole that let an unapproved PC start video while the pairing code was on screen.
+    fun onControlMessage(text: String, gateOpen: Boolean = false) {
         val trimmed = text.trim()
         if (trimmed.startsWith("pong ")) {
             val stamp = trimmed.removePrefix("pong ").trim().toLongOrNull()
