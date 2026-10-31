@@ -7,10 +7,11 @@ corrects it after review.
 ## Now
 
 - **Position (2026-11-02, manager takeover): Phase 12 is measured and recorded; Phase 13 is
-  running; Phase 14 not started.** Two local checkpoints are committed and not pushed:
-  `f86f80e` (pairing/reconnect security) and `2ccf79c` (desktop Files, navigation and shell UX).
-  The remaining Phase 12/13 work is still uncommitted and must be split into later reviewed
-  commits. Everything below is `phone`-verified on `2c0f6edc` unless marked otherwise.
+  running; Phase 14 not started.** Four local checkpoints are committed and not pushed:
+  `f86f80e` (pairing/reconnect security), `84274b8` (desktop Files/navigation/shell UX),
+  `fb7243a` (performance and receiver runtime), and `318b09b` (Phase 12/13 records).
+  Unrelated manager handover files remain untracked and were deliberately excluded. Everything
+  below is `phone`-verified on `2c0f6edc` unless marked otherwise.
 - **Phase 12 round 4 (2026-11-01, final tree): 6 pass, 2 miss.**
   - PASS: connect 0.944 s; Wi-Fi typing **p50 107.1 / p90 119.6 ms** (n=100, 5 GHz, no adb
     forward); moving-window fps 42.0; VS Code 13.48 s cold; old-PC 1080p proxy; governor drop.

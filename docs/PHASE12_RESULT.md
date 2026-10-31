@@ -1,14 +1,17 @@
 ﻿# PHASE 12 RESULT: speed and lightness
 
-Status: **PART A FINISHED (B-104 software decode fixed at 19:05); PART B PHONE ROUND RUN
-20:00-21:40 on `2c0f6edc`; ROUND 2 (23 Oct, final build) brought typing to Browser 65.7 /
-Notepad++ 66.6 / VS Code 75.5 ms (all <= 80) and Notepad++ start to 12.15 s with the Wine
-warm-up shipped on by default; PHASE 12 GATE still FAILS on the Test-shell typing (87.0 ms)
-and the Notepad++ start (12.15 s; target 10 s). B-106 is FIXED: VS Code opens the workbench
-in 13.48 s cold (target <= 15 s).** Every number says
-where it came from and is labelled `phone`, `emulator`, `PC-only`, `proxy` or `code-only`;
-nothing emulator-measured is called phone-verified. The phone's Wi-Fi was OFF by owner
-request, so there is no Wi-Fi latency number (SKIPS.md row).
+Status: **ROUND 4 FINISHED (2026-11-01 01:36, phone `2c0f6edc`, final tree). B-122 FIXED (the
+typing probe fires in the product path, no harness arming). Typing: Test shell p50 **81.7 ms**
+(n=74, thermal 0, USB adb forward) - 1.7 ms over the 80 ms target, `drawn>encoded` 41.8 ms is
+the encoder floor; Browser/Notepad++/VS Code typing stay under 80 ms (65.7 / 66.6 / 75.5 from
+round 2). 5 GHz Wi-Fi typing **PASSES** at p50 107.1 / p90 119.6 ms (n=100, real Wi-Fi socket,
+no adb forward). Notepad++ start **FAILS at 10.45 s** (n=5; 9.87 s of it is Notepad++ itself
+under Wine/box64; the 9.48 s prewarm lever is rejected because it shows a ghost window and can
+leave a duplicate process - B-124). VS Code 13.48 s, connect 0.944 s, moving fps 42.0 and the
+governor still pass. PHASE 12 GATE: **6 pass, 2 miss (Test-shell USB typing, Notepad++
+start)**, both misses measured and explained, not skipped.** Every number says where it came
+from and is labelled `phone`, `emulator`, `PC-only`, `proxy` or `code-only`; nothing
+emulator-measured is called phone-verified.
 
 ## 1. What changed
 
@@ -331,19 +334,140 @@ warm desktop is ~192 MB total); with Notepad++ open: app 142.6, Xvfb 62.4, wines
 Notepad++ 195.6 MB. Proposal only (not done): pre-launch Notepad++ itself to approach the
 10 s target; that costs more RAM and is a separate decision.
 
+## 9. Round 4 (2026-10-24 13:20-13:46, phone, stopped early)
+
+The owner came back mid-round (ChatGPT on the phone at 13:44, and their tap answered the B-115
+pairing prompt 4.46 s in), so the round stopped at 13:46. Build: the 02:29 arm64 APK,
+**56,122,610 B**, sha256 `cb3aa692caa4fd6cd721242fdf770be1fa94c39a82dea76d9897442b1df56f4a`;
+Wi-Fi link to 192.168.1.16:47600 (no adb forward), 1728x1080, dropped=0. No code changed.
+
+**B1 Notepad++ pre-launch (`p12nppwarm`) A/B, click-to-visible, n=5 each:** both arms kept the
+shipped Wine warm-up ON. BEFORE (`p12nppwarm` OFF, the code default): 13.37/12.45/12.26/12.65/
+12.32 s, **median 12.45 s**. AFTER (app restarted, `p12nppwarm:1`): 17.83/10.88/16.21/11.73/
+10.96 s, **median 11.73 s**; app PSS 125,015 KB (147-201 MB before the restart), 3 processes
+(Xvfb, wineserver, notepad++.exe resident hidden). The manager re-derived both medians from
+independent timestamps (the `P6 Starting Notepad++...` p4.log line to the `npp-visible.png`
+write time): 13.30/12.40/12.22/12.61/12.29 -> **12.40 s** and 17.52/10.82/16.17/11.66/10.92 ->
+**11.66 s**, so the numbers hold. Honest limits: the spread widened (10.9-17.8 s), the win is
+0.7 s on the median, the first AFTER open was the slowest (the pre-launched process was not
+visibly reused), and the `P12NPPPREWARM` logcat line was lost to buffer rotation, so the cause is
+plausible, not proven. The target is still missed by 1.7 s. Verdict (manager): keep the code,
+**default OFF** (FIX LATER), do not enable; the switch is runtime-only (no prefs write) and is
+false at every app start.
+
+**B1 typing over Wi-Fi: NOT MEASURED (BUGS B-122).** 25 keys went through the real PC input path
+and landed in the Browser (screenshot), the shell logged every key (`keyAtFocused` 0->58,
+`keyFlashes` 29, `keyup vk=84..89`), but in this 1728x1080 state the phone sent **zero** `lat`
+reports, so the receiver printed 0 `LATSTAGE` (n=0). The same build had sent `P5 LAT` at 02:51,
+at the governor's 960x540. This is not a Wi-Fi failure: the link was 5 GHz 5240 MHz, RSSI -30,
+433 Mbps, battery 37->35 %, thermal 3. The right log was checked (`files/p4/p4.log`, 16.3 MB,
+13:45; `files/desktop/` is empty): 1,334 `P5 LAT` total, last at 2026-10-23 02:51:30.934, none
+newer. The probe arming and the flash-listener stage are untouched in `git diff`; the measured
+difference from yesterday's working runs is the stream size (1728x1080 today vs the governor's
+960x544 then) and a focused shell window. Next debug step: log probe completion in
+`Phase5Session.onVideo` and `Phase5Desktop.onFlashDrawn` on one instrumented phone run. The
+Test-shell 87.0 ms re-check and the Wi-Fi row both stay unset.
+
+**B-115/B-116 (partial only):** PC unpinned (`trust forget` + 2 stale pins), phone `forget-all`
+(pins=0), desktop restarted, unpaired connect. Code 983053 shown on both sides, **zero video
+frames between prompt and Yes**, video only after `PAIR_YES` -> `gate open` -> display ->
+video-on. The Yes came from the owner at +4.46 s, so the >=300 s wait, the `DROP control
+gate=PAIRING` lines and the deny path are **unproven** (BUGS B-123). One B-116-style sample
+behaved: a forgotten PC while the old desktop was live got `SESSION refused ... desktop is
+live`, and the receiver printed one plain `VIEW FAILED` and exited - no reconnect storm; the
+500/1000/2000 ms backoff remains unmeasured. Files/Back/focus were not run.
+
+## Round 3 (2026-10-31, phone 2c0f6edc): B-122 fixed, the Wi-Fi typing number obtained
+
+Builds: arm64 debug APK **56,124,214 B**, 2026-10-31 00:39:22, sha256
+`2DC03A070B85AF1DEA24312B6D1EFB3DA8223F791F1B61D40BBEE2090051328E` (B-122 fix),
+then **56,124,146 B**, sha256 `0E4F844A1E4C1F340BE05FD1241973BDF3F7F8A98D0A3E5F25542CCFE6CEA7D8`
+(the same source plus the Test-window change below; installed at 00:47, re-assembled for the
+gate at 07:1x with identical bytes). Both installed with
+`adb install -r`; the receiver connected to the phone's Wi-Fi address `192.168.1.9:47600` with
+**no adb forward**. Label: **phone** for every number in this section unless said.
+
+### B-122 root cause and fix (file:line, from the code + the 00:17 checkpoint logs)
+
+1. `Phase5Session.kt:470-480` arms a `Probe` on every key-down and posts `desktop.key(...)`.
+2. `Phase5Desktop.kt:218` `setFlashListener` forwards to `ShellRoot.setFlashListener`
+   (`Phase6Shell.kt:645-650`), which wires **only** the Test window's canvas (`testContent`) and
+   the harness probe chip.
+3. In shell mode `Phase5Desktop.kt:206` `key()` goes to the shell. `Phase6Shell.kt:1054-1057`
+   called only `probeChip.flash()`; `Phase6Shell.kt:195-199` returns at once and logs
+   `P5PROBE chip flash SKIPPED (armed=false)` unless the chip was armed, and the chip is armed
+   only by the harness command `p6:probe-chip` (`Phase6Dispatch.kt:76`), default disarmed.
+4. With no draw time, `Phase5Session.kt:383` (`tDrawUs > 0`) never calls `sendLatency`
+   (`Phase5Session.kt:390-395`), so no `P5 LAT` and no `LATSTAGE`.
+5. The 2026-10-24 run never sent `probe-chip` (`p12live/p7-old.log`: 868 `P6DISPATCH`, 0
+   `probe-chip`), so B-122 was a missing flash source in the product path, not a 1728x1080
+   regression; at 960x540 the old measurements had used the Test window's own flash area.
+
+Fix (minimal, no extra pixels): `ShellRoot.flashFrame()` asks for one full-shell redraw on
+key-down and `ShellRoot.dispatchDraw` reports the composed frame's `System.nanoTime` to the
+probe; `Phase6Shell.kt:1054-1059` now calls it next to the chip. The chip stays a harness-only
+instrument. No behaviour change for the user: the shell frame is the one the encoder takes next.
+
+Proof, **phone**, 1728x1080, Browser focused, 25 PC keys through SendInput into the receiver
+window: **27 `LATSTAGE`** (25 text keys + Ctrl+A and Delete), **p50 84.9 ms / p90 107.1 ms**
+(min 73.6, max 127.8); text `abcdefghijklmnopqrstuvwxy` visible in the desktop shot
+(`p12full/b122c.png`, 1728x1080). Stage split example: pc>phone 20.6, recv>dispatch 15.0,
+dispatch>drawn 5.2, drawn>encoded 49.5, encoded>pc_rx 10.4, pc_rx>presented 6.4.
+
+### B3. Wi-Fi typing (5 GHz, real PC input path), target p50 <= 120 ms
+
+Link: **5220 MHz = 5 GHz**, 11ac, RSSI **-58 dBm**, link speed 325 Mbit/s, SSID unchanged (owner's
+network untouched), no adb forward. Phone: battery 46 %, thermal status 0, mCallState 0.
+
+| Run | n | p50 | p90 | min | max | text landed |
+|---|---|---|---|---|---|---|
+| 1 (00:41) | 27 | **84.9** | 107.1 | 73.6 | 127.8 | shot `b122c.png` |
+| 2 (00:42) | 27 | **97.2** | 134.2 | 82.9 | 143.6 | same field, same string |
+
+Verdict: **PASS on the target (p50 <= 120 ms)**; run 2's p90 is above 120 ms, recorded as is.
+
+### B3b. Test shell, target p50 <= 80 ms (attempt, still missed)
+
+The Test window kept a `postInvalidateOnAnimation()` loop (`Phase5Desktop.kt:475-476`), so the
+encoder was fed at 60 fps forever. BEFORE on this build with the animation on, 1728x1080,
+Test window + EditText focused, 25 keys: **p50 239.0 / p90 259.9 (n=25)**.
+AFTER (that self-invalidation removed; motion for fps runs now comes from pointer moves only):
+- 1728x1080: **p50 198.9 (n=14)** - 11 keys produced no `lat` report (the frame queue dropped
+  them, `dropped` in the phone stats was high), so n < 25 and this row is not a gate number;
+- forced low-power encoder (`p12lowres`, 1296x810 @ 30 fps): **p50 103.1 / p90 144.3 (n=26)**.
+Stage split there: pc>phone 6-11, recv>dispatch 1.4, dispatch>drawn 7-15, **drawn>encoded 45-63**,
+encoded>pc_rx 15-17, pc_rx>presented 3-5. The encoder stage is the whole gap; at 30 fps pacing
+a key frame waits up to one slot plus the encode.
+Verdict: **the <= 80 ms Test-shell target is still missed**; the animation fix helps
+(239 -> 199 at 1080p, 103 at 1296x810) but does not reach the gate. Round 2's 87.0 ms was
+measured at the governor's 960x544, which this phone could not be put back into on 2026-10-31
+(thermal 0, 1728x1080 desktop), so the comparison is not like-for-like and is labelled as such.
+
+### B4. Notepad++ start
+
+Not re-measured in this round: **the phone disappeared at 07:07** (`adb devices` empty) before
+the Wine round. The 2026-10-24 numbers stand (median 11.66-11.73 s with `p12nppwarm:1`,
+12.40-12.45 s without, n=5 each; target <= 10 s missed by ~1.7 s).
+
+### B-122 status after this round
+
+FIXED in code and proven on the phone (the probe fires in the product path at 1728x1080 without
+any harness arming). The Wi-Fi typing gate number exists: p50 84.9 / 97.2 ms.
+
 ## PHASE 12 GATE
 
-PHASE 12 GATE: **FAILED** - 5 targets pass, 2 miss, 1 is skipped (Wi-Fi off by owner).
+
+PHASE 12 GATE: **FAILED** - 6 targets pass, 2 miss (Test-shell USB typing 81.7 vs 80, Notepad++ start 11.7 vs 10), all measured.
 CONNECT: PASS 0.944 s visible (target <= 5 s) | phone
-TYPING USB: **FAIL on the Test-shell case only** - p50 Browser 65.7 / Notepad++ 66.6 / VS Code 75.5 (all <= 80, n=25 each; VS Code from the urgent build) and Test shell **87.0 / p90 97.0** (n=25, 7.0 ms over). Target <= 80 ms, profile 0 | phone
-TYPING 5 GHz WI-FI: SKIP - owner Wi-Fi OFF; no number claimed (SKIPS.md) | phone/dev path only
+TYPING USB: **FAIL on the Test-shell case only** - p50 Browser 65.7 / Notepad++ 66.6 / VS Code 75.5 (all <= 80, n=25 each; VS Code from the urgent build) and Test shell **p50 81.7 / p90 113.5** on the shipped 12 Mbps build (n=74, thermal 0, USB adb forward, 2026-11-01 01:17, session S3; 1.7 ms over the 80 ms target). Earlier sessions of the same code: 101-103 ms (T12-2), 82.9 ms (T12-3 baseline). Session-to-session spread is 8-20 ms, so one session is never enough. Encoder knob A (operating rate 120) was measured **worse** (85.9 ms) and reverted; knob B (bitrate 12 -> 8 Mbps) looked like 75.0 ms in one session but failed in the separate-session control (S1 87.5, S2 101.2, S2 had a transport stall with enc>pc_rx 27.9 ms, 12 Mbps control 81.7) and was **reverted**; T12-4 also fixed the stale `QualityPlanTest` literal and the tree is green again. Stage medians on the shipped build: pc>phone 10.9, recv>dispatch 2.3, dispatch>drawn 9.8, **drawn>encoded 41.8 (encoder floor)**, enc>pc_rx 6.3, pc_rx>presented 4.2. B-122 fixed; probe fires in the product path. | phone
+TYPING 5 GHz WI-FI: **PASS** - n=100 (4 runs x 25 keys), **p50 107.1 / p90 119.6** (min 72.4, max 137.4), target p50 <= 120 and p90 <= 120; 5 GHz 5220 MHz, RSSI -23..-25, thermal 0, desk 1728x1080, 2026-11-01 01:24, no adb forward (real Wi-Fi socket to 192.168.1.9). Stage medians: pc>phone 10.7, recv>dispatch 3.9, dispatch>drawn 22.2, drawn>encoded 60.1 (rises from 41.8 on USB - the encoder waits on a slower output drain), enc>pc_rx 6.7, pc_rx>presented 5.0. Earlier runs were p50 84.9/97.2 and p90 107.1/134.2 on a stale build with n=25 each; this run replaces them. p90 margin is 0.4 ms. B-122 probe fires on the Wi-Fi build. | phone
 MOVING-WINDOW FPS: PASS 42.0 fps avg / 55.9 max / dropped 0 at the governor's 960x540 (target >= 30); not a 1080p like-for-like | phone
-NOTEPAD++ START: **FAIL 12.15 s with the shipped Wine prewarm** (second run; 11.2 s in the first) / **28.23 s cold without it** (target <= 10 s; 2.1 s over). The warm-up removes the boot from the click, not Notepad++'s own start | phone
+NOTEPAD++ START: **FAIL 10.45 s** (n=5: 10.03 / 9.50 / 10.57 / 10.45 / 10.89, thermal 0, desk 1728x1080, shipped default, 2026-11-01 01:27-01:35; target <= 10 s, 0.45 s over). Timeline of one open: broadcast->spawn 0.155 s, spawn->window in the shell 0.177 s, and **9.87 s of Notepad++ itself under Wine/box64 from spawn to the first full-content frames** - that gap is the guest, not our plumbing. The one lever that reaches the target is `p12nppwarm:1` (**9.48 s**, n=3: 9.48 / 9.39 / 9.58): it starts a Notepad++ copy after the Wine warm-up and closes it again, so the user's open finds the pages warm. It is **not shipped**: that pre-launch copy maps a Notepad++ window on the desktop, and if a real open arrives while it is still warming the guard keeps BOTH processes (`P12NPPPREWARM keep: 2 copies running`), leaving a duplicate window - B-124. The switch stays **default OFF**; earlier round-4 numbers (12.45 / 11.73 s) were measured while racing the prewarm and are superseded. | phone
 VS CODE SMALL PROJECT: PASS **13.48 s** cold to `.monaco-workbench` (target <= 15 s); B-106 FIXED | phone
 OLD-PC 1080p FULL SCREEN: PASS on the 2-core proxy (35.65 fps hardware / 36.68 fps software, dropped 0, CPU 33-35 %, WS 96-131 MB) | proxy
 GOVERNOR: PASS real 1920x1080 -> 960x540 at thermal=3 in 0.2 s; desktop/windows kept; PC dropped 0 | phone
-BUGS: B-106 FIXED | B-103 OPEN (Wine paste: marker set, Ctrl+V reaches NPP, no SelectionRequest) | B-105 OPEN (stale Settings text)
-GATES: Android :app:testDebugUnitTest / :app:lintDebug / :app:assembleDebug BUILD SUCCESSFUL (194 tests, 0 failures, 3 skipped; lint 0 errors, 98 warnings); APK 55917404 B; PC cargo test 78/0 + lock_crash 1/0, clippy -D warnings exit 0 (first run under parallel Gradle load flaked one lock test, clean repeat passed; B-107); git diff --check 0
+BUGS: B-122 FIXED (probe now fires in the product path; evidence `p12full/b122c.png`, `p12full/RESULT.txt`) | B-123 OPEN (B-115 proof partial: owner tapped Yes 4.46 s in) | B-103 OPEN (Wine paste: marker set, Ctrl+V reaches NPP, no SelectionRequest) | B-105 OPEN (stale Settings text)
+GATES (manager, 2026-10-24 12:57, tree unchanged since 02:28): Android **214 tests / 0 failures / 3 skipped**, lint **0 errors / 142 warnings**, `assembleDebug` 3 APKs (arm64 56,122,610 B); PC **100/0** + `lock_crash` 1/0, clippy `-D warnings` exit 0; `git diff --check` 0
 NO COMMIT: all changes uncommitted for the manager.
 
 

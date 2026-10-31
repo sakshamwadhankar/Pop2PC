@@ -1,4 +1,4 @@
-# PHASE 13 RESULT: polish (UI, UX, browser, bug sweep)
+﻿# PHASE 13 RESULT: polish (UI, UX, browser, bug sweep)
 
 Run: 2026-10-23 00:30-14:00. Working tree, uncommitted (the manager commits).
 Evidence root: `C:\Users\Asus\AppData\Local\Temp\opencode\p13`.
@@ -131,3 +131,34 @@ uncommitted.
 
 Limits: D12 and D14 are SKIPS; D16's VS Code final-build re-run is blocked by B-110; the
 phone thermal-3 and step-15 phone re-run are SKIPS; the GUI forced-kill lock restart is B-112.
+
+## 7. Phase 13 follow-up proofs (2026-11-01, phone `2c0f6edc`)
+
+These close the two tester bugs that blocked the phase (docs/TEST_REPORT.md T-001/T-002) and
+record the one UX gap the proof exposed. All runs are `phone`, thermal 0, USB adb forward,
+desk 1728x1080, unattended (harness `accept`/`deny`, no `input tap`).
+
+| Item | What was run | Result | Evidence |
+|---|---|---|---|
+| **B-115** security gate (blocker) | No trusted PC (`pins=0` both sides), unpaired receiver `view --no-lock`, code `983053` on both sides, two full 300 s waits, then deny, then accept | **PASS (functional).** While pairing: `DROP control "display 1728 1080" (gate=PAIRING)`, `DROP control "video-on" (gate=PAIRING)`, `P5 VSTAT sent=0 ... shell=down`. Both 300 s waits ended `VIEW FAILED: pair confirm timed out` with **0** `VSTAT` lines. Deny: `PAIR_NO cut` + `VIEW FAILED: phone answered No; nothing was stored`, no video. Accept: `PAIR_YES stored fpr=... pins=1` -> `P5 gate open, waiting for video-on` -> **181** `VSTAT` lines up to `presented=166`, desktop visible. | `Temp\opencode\t13-1\RESULT3.txt`, raw `view-usb.log`, `view-usb-run2.log`, `view-deny2.log`, `view-accept.log`, `p4-tail.txt` |
+| **B-125** locked phone shows no pairing prompt (new, major) | The proof ran with the phone screen off; `p4.log` shows `PAIRING prompt code=983053` immediately followed by `PAIRING notification skipped: app in front`; `screencap` is black | **FIXED 2026-11-01 - see the next row for the fix and the live proof.** The code was only visible on the app's home screen; a locked phone gave the user no notification, no sound and no code while the PC waited. | `Temp\opencode\t13-1\phone-pair*.png`, `p4.log` slice |
+| **B-125 fix** (T13-3 + T13-3p/T13-3p2) | `Phase4PairingPrompt.wanted()` + `showPairingNotification` changed; the APK was installed and the phone locked; two runs: screen off, then screen on with the keyguard showing and `HomeActivity` resumed behind it; unpaired receiver each time | **FIXED (code + unit + live keyguard proof; one limit).** Unit tests 4/4; full gate green (`:app:testUnitDebugUnitTest :app:lintDebug :app:assembleDebug` BUILD SUCCESSFUL 10:14). Run 1: `PAIRING notification posted fg=false interactive=false keyguard=true`. Run 2: `posted fg=false interactive=true keyguard=true`. Both codes **983053** (PC `PC code: 983053`, notification `Does your PC show 983053?`), `vis=PUBLIC` (`vis=1`, id 47611), deny -> `PAIR_NO cut`, notification gone. **Limit:** the pre-fix skip state needs `AppForeground > 0` behind a non-occluded keyguard; on this phone the keyguard marks the activity `isSleeping=true`/`mVisible=false`, so the counter reads 0 and that state was not reproduced live. The unit test `foregroundKeyguardLockedIsWanted` covers that input; T13-1's `skipped: app in front` is the observed pre-fix state. | `Temp\opencode\t13-3\gate-t13-3.log`, `Temp\opencode\t13-3p\RESULT5p.txt` + `lock1.png`/`lock2.png`/`notif.txt`, `Temp\opencode\t13-3p2\RESULT5p2.txt` + `p4.txt`/`notif.txt` |
+| **B-116** one-sided trust (blocker) | Phone forgot the PC (PC still pins it): a) new-PC pair path observed 35.5 s with `lock-status` at ~4 s and ~10 s, then deny; separately the desktop-live refusal; b) live reconnect loop after the link was stopped; c) both refusal paths | **(a) PASS.** `input-desktop=Default`, `lock-state=unknown` at both samples; the receiver sat in pairing (`PC code: 983053` == phone `PAIRING prompt code=983053`) and the lock is only engaged after `connect_and_pair` returns. **(b) PASS.** `RECONNECT retry in 500/1000/2000/4000/8000/10000 ms` then the 10 s cap; **0** reconnects in the 35.5 s pairing wait, after deny, and in the reverse run (old bug: 115 per 30 s). **(c) PARTIAL.** Desktop-live refusal is plain on both sides (`SESSION refused different PC while desktop is live` -> one `VIEW FAILED: Your phone is already showing a desktop to another PC...`); deny is plain too (`PAIR_NO cut` -> `VIEW FAILED: phone answered No; nothing was stored`, exit 1, 0 reconnects). The reverse one-sided case has no refusal - see B-126. | `Temp\opencode\t13-2\RESULT4.txt`, `onesidedB.log`, `onesided-runA.log`, `deny2.log`, `backoff.log`, `reverse.log` |
+| **B-126** reverse one-sided trust (new, major) | PC trust list emptied, phone still pins the PC; unpaired receiver `view --no-lock` | **OPEN - FIX NOW (Phase 13, after T13-3).** PC printed `PC code: 983053` and waited; the phone answered `P5 -> PC control "trusted"` from its own pin without prompting, then `SESSION dead-timeout` at ~15 s; PC printed `VIEW FAILED: phone closed the connection while pairing`. Zero video, zero reconnect storm, but a code the user can never match and no plain reason on either side. Fix: the phone must show the prompt for a pair request from a pinned PC (and re-store on Yes); the PC must not wait 300 s after an unexpected `trusted` - one plain line and exit. | `Temp\opencode\t13-2\reverse.log`, `Temp\opencode\t13-2\RESULT4.txt` item (c), `p4.log` slice `1793479532464`-`1793479547506` |
+
+Limits of the B-115 proof: the code match is proven from both logs (phone `PAIRING prompt
+code=983053` / PC `PC code:  983053`), not from a photograph, because the locked screen
+captures black (that is B-125). B-116 is proven in T13-2 ((a) and (b) pass, (c) partial -
+the reverse one-sided case is B-126); its `pc-pairing-state.png` caught the terminal rather
+than the receiver window, so (a) rests on `udreceiver lock-status` (`input-desktop=Default`)
+and the receiver's own log, not on a picture. Both B-116 runs used the locked phone driven
+only by harness broadcasts (no `input tap`), and the phone was left clean afterwards
+(0 processes, 0 receivers, 0 forwards, `stay_on=0`, input desktop Default).
+
+Limit of the B-125 proof: the fix and its unit test are in the tree and the gate is green,
+but the exact pre-fix state - `AppForeground` counting a resumed activity while the keyguard
+covers it - was not reproduced live. With the keyguard showing, this phone marks the activity
+`isSleeping=true`/`mVisible=false`, so the counter reads 0; the notification still posts via
+the keyguard condition. The unit test `foregroundKeyguardLockedIsWanted` covers the counter>0
+input, and T13-1's `PAIRING notification skipped: app in front` is the observed pre-fix state.
+The two live runs that did run are quoted in the B-125 fix row.

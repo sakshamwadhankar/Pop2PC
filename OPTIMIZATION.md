@@ -111,10 +111,56 @@ Measured basis (phone rows are labelled; the rest are `emulator`, `proxy` or `PC
   Notepad++ 12.2 / 1.5 / 6.7 / 38.0 / 5.0 / 2.1; Browser with X11 behind 12.2 / 1.2 / 7.2 /
   36.7 / 5.6 / 1.9 (PC->phone / receive->dispatch / dispatch->drawn / drawn->encoded /
   encoded->PC / decode-present). The dominant stage is the phone's canvas-to-encoder.
-- The one remaining typing miss is the Test shell (**87.0 ms**): its permanent 60 fps
-  animation keeps frames in flight, so the key frame waits 29.3 ms in `encoded>pc_rx`.
-  Dropping stale animation frames ahead of an input frame on the receiver would be the next
-  lever; it is not attempted because it risks animation smoothness.
+- The one remaining typing miss is the Test shell: p50 **81.7 ms** on the shipped 12 Mbps
+  build (n=74, thermal 0, 2026-11-01), 1.7 ms over the 80 ms target. Its permanent 60 fps
+  animation is gone (see 5.3), so what is left is the encoder stage itself: `drawn>encoded`
+  median **41.8 ms** is 51 % of the whole budget, and no encoder knob tested so far moves it.
+
+### 5.3 Round 4 (2026-11-01, phone): encoder knobs, session spread, Wi-Fi gate, NPP start
+
+- **Session-to-session spread was bigger than any knob.** The same 12 Mbps code measured
+  p50 101-103 ms (T12-2), 82.9 ms (T12-3 baseline) and 81.7 ms (T12-4 S3) in different
+  receiver sessions at thermal 0. One session can never prove a 1-2 ms change; every gate
+  number below is a median of a stated n and session.
+- **Encoder knob A (operating rate 120)** made it **worse**: 85.9 ms vs 82.9 baseline (n=74
+  each). Reverted.
+- **Encoder knob B (bitrate 12 -> 8 Mbps)** looked like a win in one session (75.0 ms, n=50),
+  but the separate-session control killed it: 8 Mbps S1 87.5 / S2 101.2 (S2 had a transport
+  stall, `enc>pc_rx` 27.9 ms) vs 12 Mbps S3 81.7. The real encoder-time effect was only
+  ~1.6 ms. **Reverted to 12 Mbps**, and the unit test that still asserted the old literal was
+  fixed so `:app:testDebugUnitTest` is green again.
+- **Stage budget on the shipped build (USB, Test shell, n=74):** PC->phone 10.9 /
+  receive->dispatch 2.3 / dispatch->drawn 9.8 / **drawn->encoded 41.8** / encoded->PC 6.3 /
+  PC-rx->presented 4.2 ms. The encoder is the floor; the phone-side canvas work is already
+  ~10 ms.
+- **5 GHz Wi-Fi typing PASSES:** n=100 (4 runs x 25 keys), **p50 107.1 / p90 119.6 ms** on
+  5220 MHz, RSSI -23..-25, thermal 0, desk 1728x1080, no adb forward. `drawn>encoded` rises to
+  **60.1 ms** on Wi-Fi because the encoder waits on a slower output drain; `pc>phone` stays
+  ~10.7 ms. p90 margin is 0.4 ms, so this row is close to the edge.
+- **Notepad++ start is 10.45 s** (n=5, thermal 0, shipped default), 0.45 s over the 10 s
+  target. A single open: broadcast->spawn 0.155 s, spawn->window 0.177 s, then **9.87 s of
+  Notepad++ under Wine/box64** - the guest, not our plumbing. The NPP prewarm reaches
+  **9.48 s** (n=3) but maps a ghost window and leaves a duplicate process when a real open
+  races it (BUGS B-124), so it stays default OFF (SKIPS.md row).
+
+### 5.2 Round 3 (2026-10-31, phone): the probe fix and the real Wi-Fi number
+
+- **The typing probe had no draw source in the product path.** In shell mode the only flash
+  was the harness chip, armed by hand; with a real window focused `tDrawUs` stayed 0 and no
+  `lat` report was ever sent (B-122). `ShellRoot` now reports the shell frame that carries the
+  key-down (`flashFrame()` + `dispatchDraw`), so the probe works with no harness step and no
+  extra pixels. 1728x1080, Browser, 25 PC keys: 27 `LATSTAGE`, p50 **84.9 / p90 107.1 ms**.
+- **5 GHz Wi-Fi typing (first numbers on a real link): 5220 MHz, 11ac, RSSI -58 dBm, thermal 0,
+  battery 46 %.** Two runs, 25 keys each through SendInput into the receiver window, no adb
+  forward: p50 **84.9** (p90 107.1) and **97.2** (p90 134.2) ms. The target is p50 <= 120:
+  passed. Wi-Fi costs about 10-20 ms over the 66-75 ms USB figures.
+- **Test window animation:** the Test window self-invalidated at 60 fps forever, which at
+  1728x1080 kept the encoder queue full. Removing it took the Test shell from p50 239.0
+  (animation on, n=25) to 198.9 (n=14) at 1728x1080 and to **103.1 ms (n=26)** at the
+  low-power 1296x810@30 fps encoder - still over the 80 ms target, with `drawn>encoded`
+  45-63 ms as the whole gap. At 1080p the phone encodes a 1728x1080 frame too slowly for the
+  80 ms budget; the earlier 87.0 ms was recorded at the governor's 960x544, which this phone
+  would not drop to on 2026-10-31 (thermal 0).
 
 ## 6. How we measure (every phase that touches speed)
 

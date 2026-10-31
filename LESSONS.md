@@ -349,3 +349,17 @@ these facts.** Re-verify anything critical: Android changes.
 - **Python behind the owner's proxy:** the Windows system proxy (the owner's Tor IP rotator)
   times out on some sites; scripts that must reach the internet use a direct connection
   (`ProxyHandler({})`), as `curl` does by default.
+
+## Tooling (2026-10-24): pi cannot use OpenCode's free models any more
+
+- `pi -p --provider opencode --model deepseek-v4.1-flash-free "reply OK"` returns
+  **`403 FreeTierError: OpenCode's free tier can only be used from within OpenCode`**. This is a
+  policy block, not quota: waiting or retrying does not fix it. Earlier the same lane returned
+  `429 FreeUsageLimitError`; both are dead ends now.
+- The **same model answers inside OpenCode**: `opencode run --model
+  opencode/deepseek-v4.1-flash-free "reply OK"` -> `OC_OK` (tested 13:08). The coder lane must
+  run in OpenCode (`opencode run`, or `opencode api session.prompt` on a live session), never in
+  pi, until the owner subscribes or another key exists.
+- The pi plugin `git:github.com/verdulife/opencode-free` (in `~/.pi/agent/settings.json`) is what
+  breaks; `defaultProvider` there is still `openrouter` (no credits: 402), so plain `pi` fails
+  too.
