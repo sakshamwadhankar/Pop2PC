@@ -6,10 +6,11 @@ corrects it after review.
 
 ## Now
 
-- **Position (2026-11-02, manager takeover): Phase 12 is measured and recorded; Phase 13 is
-  running; Phase 14 not started.** Four local checkpoints are committed and not pushed:
+- **Position (2026-11-02, manager review): Phase 12 is measured and recorded; Phase 13 is
+  running; Phase 14 not started.** Five local checkpoints are committed and not pushed:
   `f86f80e` (pairing/reconnect security), `84274b8` (desktop Files/navigation/shell UX),
-  `fb7243a` (performance and receiver runtime), and `318b09b` (Phase 12/13 records).
+  `fb7243a` (performance and receiver runtime), `318b09b` (Phase 12/13 records), and
+  `6e92080` (B-126 reverse pairing trust fix).
   Unrelated manager handover files remain untracked and were deliberately excluded. Everything
   below is `phone`-verified on `2c0f6edc` unless marked otherwise.
 - **Phase 12 round 4 (2026-11-01, final tree): 6 pass, 2 miss.**
