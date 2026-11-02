@@ -26,34 +26,16 @@ corrects it after review.
     before the race is fixed.
   - Full numbers, stages and evidence: `docs/PHASE12_RESULT.md` "PHASE 12 GATE" and
     `OPTIMIZATION.md` 5.3.
-- **Phase 13 (in progress, 2026-11-01 02:10).** **B-115 PASS** (T13-1, phone): unpaired PC got
-  only the pairing exchange - `DROP control "display 1728 1080" (gate=PAIRING)` and
-  `DROP control "video-on" (gate=PAIRING)`, `P5 VSTAT sent=0`, two full 300 s waits with 0 video
-  frames, deny stored nothing, accept opened the gate (181 VSTAT, presented=166). Evidence
-  `Temp\opencode\t13-1\RESULT3.txt`, recorded in `docs/PHASE13_RESULT.md` section 7.
-  **B-125 found (major):** with the phone screen off/locked the pairing code is invisible and the
-  notification is suppressed (`PAIRING notification skipped: app in front`); decision FIX NOW in
-  Phase 13. **T13-2 done (phone):** B-116 (a) PASS (lock desktop never engaged before trust -
-  `input-desktop=Default` at ~4 s and ~10 s, codes matched), (b) PASS (live backoff
-  500/1000/2000/4000/8000/10000 ms, **0** reconnects vs the old 115 per 30 s), (c) PARTIAL:
-  desktop-live refusal and deny are plain on both sides, but the **reverse** one-sided case is
-  **B-126** (new, major): the PC forgets, the phone still pins it, the PC shows a code the phone
-  never shows, the phone answers `trusted`, then `SESSION dead-timeout` ~15 s and the PC prints
-  `VIEW FAILED: phone closed the connection while pairing`. FIX NOW, after T13-3. Evidence
-  `Temp\opencode\t13-2\RESULT4.txt`, recorded in `docs/PHASE13_RESULT.md` section 7.
-- **T13-3 (B-125) FIXED** (code + 4 unit tests + full gate green 10:14). Live on the phone:
-  screen off -> `posted fg=false interactive=false keyguard=true`; screen on + keyguard ->
-  `posted fg=false interactive=true keyguard=true`; code **983053** matched the PC and the
-  notification text, `vis=PUBLIC`, deny removed it. **Limit:** the pre-fix skip state
-  (`AppForeground > 0` behind the keyguard) is not reachable on demand - the system marks the
-  activity sleeping/invisible, so the counter reads 0; that input is covered by the unit test.
-  Recorded in BUGS.md, `docs/PHASE13_RESULT.md` section 7, SKIPS.md.
-- **Running now: T13-3b, the B-126 fix** (PC reads the phone's greeting before showing a code;
-  phone shows a real prompt for `pair-request` even when it pins the PC; tests both sides;
-  live reverse-case re-proof on the locked phone). The phone is on its lock screen and must
-  stay locked.
-- After that: D12 toasts, D14 welcome card, Files/Back/focus, box64 16 KB swap + Wine proof,
-  D22 thermal-3, final phone round.
+- **Phase 13 (2026-11-02, manager review).** B-115 is phone-proven; B-125 is fixed with
+  screen-off/keyguard notification proof; and **B-126 is fixed** in T13-3b. On phone
+  `2c0f6edc`, normal pairing, reverse one-sided re-pair accept, and deny all passed. Both sides
+  showed code `983053`; before Yes, VSTAT stayed 0 for 27 s and reconnects stayed 0; after Yes,
+  the phone logged `REPAIR stored` and `presented` advanced 0 -> 22. The re-pair gate stayed
+  closed until Yes. Evidence: `Temp\opencode\t13-3b\RESULT6.txt`. Thermal status was 3, so
+  the performance precondition was not met; this does not affect the security proof. The phone
+  was left locked and clean.
+- **Next Phase 13 work:** D12 desktop toasts, D14 welcome card, Files/Back/focus, Box64 16 KB
+  swap + Wine proof, D22 thermal-3, and the final phone round. Phase 14 follows Phase 13.
 - **How to measure (recipe in `docs/prompts/T12-3.md` and `T12-4.md`):** cool to Thermal Status
   <= 1 (screen off, poll every 2 min), USB `adb forward tcp:47600 tcp:47600` (or the real Wi-Fi
   socket for Wi-Fi runs), `udreceiver view --addr ... --no-lock`, `p6:open:test`, 25 keys per run

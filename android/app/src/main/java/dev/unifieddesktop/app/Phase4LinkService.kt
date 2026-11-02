@@ -776,11 +776,9 @@ class Phase4LinkService : Service() {
                 }
                 val msgs = dec.feed(buf, n)
                 for (m in msgs) {
-                    val gate = when {
-                        paired -> Phase4Protocol.Gate.PAIRED
-                        decisionPending != null -> Phase4Protocol.Gate.PAIRING
-                        else -> Phase4Protocol.Gate.UNPAIRED
-                    }
+                    // B-126: a fresh or re-pair prompt keeps the B-115 gate closed, even
+                    // though the phone still pins this PC; Yes alone reopens it.
+                    val gate = Phase4RePair.gate(paired, decisionPending != null)
                     if (!Phase4Protocol.mayProcessChannel(m.channel, gate)) {
                         say("DROP ${Phase4Protocol.channelName(m.channel)} (gate=$gate)")
                         continue

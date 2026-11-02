@@ -1,3 +1,5 @@
+Done 11 of 14. Updated 14:43. Now: T13-3b B-126 fixed=PC reads the greeting + phone `pair-request` prompt + re-pair gate closed until Yes; live A/B/C PASS (thermal 3), next manager decision.
+
 # Night run: Phase 12 finish + Phase 13 polish
 
 ## T13-2 — B-116 live proof (2026-11-01 02:13-02:20, coder)
