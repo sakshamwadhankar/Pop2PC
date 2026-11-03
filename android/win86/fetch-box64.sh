@@ -20,6 +20,11 @@ set -euo pipefail
 # lands in it (evidence/phase2/npp-typed-hello.png, 2026-10-18). A canonical copy
 # of these exact bytes is kept OUTSIDE the repo (gitignored
 # vendor/libbox64-27860e6a-f4-e1c21ed2.so).
+# 2026-11-04 T13-6: the 16 KB-linked artifact produced with this recipe,
+# sha256 69f5c12d831ff520078d06ce729c4d97b35520487875a6d4fcfb81838d585f1d,
+# was phone-verified running Wine and Notepad++ before becoming the local
+# jniLibs artifact. The APK and every arm64 native library were ELF-checked
+# with PT_LOAD p_align=0x4000. The bytes remain outside git per project rules.
 # NOT reproducible: two clean rebuilds of this recipe produced
 #   a8f3f177e4ce27c9839f7fc311711bb2787a48e6b4655f0965d162d9abc07112 and
 #   80b20b76f1eec67021ded41557a8db2d9c321b3f180166fcf35732009264daa7

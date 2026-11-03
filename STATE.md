@@ -6,13 +6,12 @@ corrects it after review.
 
 ## Now
 
-- **Position (2026-11-02, manager review): Phase 12 is measured and recorded; Phase 13 is
-  running; Phase 14 not started.** Five local checkpoints are committed and not pushed:
-  `f86f80e` (pairing/reconnect security), `84274b8` (desktop Files/navigation/shell UX),
-  `fb7243a` (performance and receiver runtime), `318b09b` (Phase 12/13 records), and
-  `6e92080` (B-126 reverse pairing trust fix).
-  Unrelated manager handover files remain untracked and were deliberately excluded. Everything
-  below is `phone`-verified on `2c0f6edc` unless marked otherwise.
+- **Position (2026-11-04, manager review): Phase 12 is measured and recorded; Phase 13 is
+  running; Phase 14 not started.** The committed branch is synchronized with `origin/main`
+  through the controller-mode planning checkpoint; the current B-117 documentation records the
+  16 KB Box64 artifact verified in this session. Unrelated manager handover files remain
+  untracked and were deliberately excluded.
+  Everything below is `phone`-verified on `2c0f6edc` unless marked otherwise.
 - **Phase 12 round 4 (2026-11-01, final tree): 6 pass, 2 miss.**
   - PASS: connect 0.944 s; Wi-Fi typing **p50 107.1 / p90 119.6 ms** (n=100, 5 GHz, no adb
     forward); moving-window fps 42.0; VS Code 13.48 s cold; old-PC 1080p proxy; governor drop.
@@ -27,16 +26,23 @@ corrects it after review.
     before the race is fixed.
   - Full numbers, stages and evidence: `docs/PHASE12_RESULT.md` "PHASE 12 GATE" and
     `OPTIMIZATION.md` 5.3.
-- **Phase 13 (2026-11-02, manager review).** B-115 is phone-proven; B-125 is fixed with
-  screen-off/keyguard notification proof; and **B-126 is fixed** in T13-3b. On phone
+- **Phase 13 (2026-11-02, manager review).** B-115 is phone-proven; **B-116 is fixed** from
+  T13-2 plus the B-126 closure; B-125 is fixed with screen-off/keyguard notification proof; and
+  **B-126 is fixed** in T13-3b. On phone
   `2c0f6edc`, normal pairing, reverse one-sided re-pair accept, and deny all passed. Both sides
   showed code `983053`; before Yes, VSTAT stayed 0 for 27 s and reconnects stayed 0; after Yes,
   the phone logged `REPAIR stored` and `presented` advanced 0 -> 22. The re-pair gate stayed
   closed until Yes. Evidence: `Temp\opencode\t13-3b\RESULT6.txt`. Thermal status was 3, so
   the performance precondition was not met; this does not affect the security proof. The phone
   was left locked and clean.
-- **Next Phase 13 work:** D12 desktop toasts, D14 welcome card, Files/Back/focus, Box64 16 KB
-  swap + Wine proof, D22 thermal-3, and the final phone round. Phase 14 follows Phase 13.
+- **T13-6 / B-117 (2026-11-04):** the 16 KB Box64 artifact is verified in the APK and on the
+  phone. All 15 arm64 APK libraries, including `libblackbox.so` and `libdobby.so`, have
+  `PT_LOAD p_align=0x4000`. Wine/Xvfb and Notepad++ ran on phone `2c0f6edc`; 767 frames were
+  presented with 0 dropped, and real PC input typed `b117ok`. Thermal Status stayed 3, so no
+  performance number is claimed; the phone is 4 KB-page and the 16 KB result is ELF/APK
+  verified rather than physical-16-KB-device verified. Evidence: `Temp\opencode\t13-6\RESULT5.txt`.
+- **Next Phase 13 work:** D12 desktop toasts, D14 welcome card, Files/Back/focus, D22 thermal-3,
+  and the final phone round. Phase 14 follows Phase 13.
 - **Deferred post-launch plan (2026-11-04):** `PLAN.md` now records an optional Controller mode
   for controlling the PC from the phone, including app control, touchpad/keyboard, explicit
   clipboard transfer, media/system controls, capture and signature features. It is explicitly
