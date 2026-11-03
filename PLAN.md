@@ -127,3 +127,68 @@ owner decide the new path before going on.
   listing draft (no name until the owner picks one), signed release build.
 - **Prove:** an internal-testing build accepted by Google Play. The owner uploads it with
   their developer account.
+
+---
+
+## Later plan: optional PC Controller mode
+
+This is deliberately **deferred until Phases 1-14 are complete and the first release is
+launched on Google Play**. It does not change the current phase order, gates, product scope,
+or Phase 14 launch criteria. It will be planned as a separate post-launch milestone, with one
+prompt and one measured gate per future phase.
+
+### Product outcome
+
+After pairing, the user may choose between two explicit modes:
+
+1. **Desktop mode (current product):** the phone runs the desktop and its apps; the PC is the
+   locked display, keyboard and mouse receiver; the phone remains usable.
+2. **Controller mode (later feature):** the PC continues running its own applications normally,
+   while the phone acts as a secure control surface for that PC.
+
+Switching modes must be explicit and visible. Controller mode must not silently engage the PC
+lock, and Desktop mode must preserve the existing lock and Exit guarantees.
+
+### Controller-mode features to evaluate
+
+- Installed-app list, launch, focus and close
+- Touchpad and remote keyboard
+- Text clipboard transfer from PC to phone and phone to PC
+- Media, volume and brightness controls
+- PC status such as CPU, memory and battery where the host can report it
+- Screenshot and recording controls
+- Signature drawing and insertion
+- Sleep, lock, restart and shutdown with clear confirmation
+- Optional PC-screen preview where it is useful, without changing Desktop mode's phone-owned
+  application architecture
+
+The feature list is inspired by the WinDock comparison, but implementation and code remain
+fresh and must follow this project's license and security rules.
+
+### Planned technical shape
+
+- Reuse the existing trusted pairing and encrypted session rather than creating a second
+  connection model.
+- Add authenticated capability negotiation so the phone and receiver agree which controller
+  actions are available.
+- Keep platform-specific work in receiver adapters: Windows APIs for Windows and the existing
+  Linux host boundary for supported Linux desktops.
+- Keep the Android controller UI separate from the phone-owned desktop shell.
+- Use allowlisted actions and structured arguments only; never expose arbitrary shell commands,
+  arbitrary executable paths, or unrestricted native controls.
+- Require explicit confirmation for destructive power and session actions.
+- Start clipboard support with explicit text pull/push. Add images and files only after the
+  text flow is secure and measured; do not depend on unrestricted Android background clipboard
+  monitoring.
+
+### Proposed post-launch order
+
+1. Controller-mode protocol and capability/security model
+2. Windows app inventory, launch, focus and close
+3. Phone controller UI and touchpad/keyboard
+4. Explicit clipboard text transfer
+5. Media, volume, brightness and PC status
+6. Screenshot, recording and signature controls
+7. Power/session actions and confirmation flows
+8. Linux host support and cross-platform acceptance
+9. Performance, reconnect, permissions, privacy and Play update review

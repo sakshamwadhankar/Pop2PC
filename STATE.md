@@ -37,6 +37,11 @@ corrects it after review.
   was left locked and clean.
 - **Next Phase 13 work:** D12 desktop toasts, D14 welcome card, Files/Back/focus, Box64 16 KB
   swap + Wine proof, D22 thermal-3, and the final phone round. Phase 14 follows Phase 13.
+- **Deferred post-launch plan (2026-11-04):** `PLAN.md` now records an optional Controller mode
+  for controlling the PC from the phone, including app control, touchpad/keyboard, explicit
+  clipboard transfer, media/system controls, capture and signature features. It is explicitly
+  deferred until Phases 1-14 are complete and the first release is launched; it does not change
+  the current scope or gates.
 - **How to measure (recipe in `docs/prompts/T12-3.md` and `T12-4.md`):** cool to Thermal Status
   <= 1 (screen off, poll every 2 min), USB `adb forward tcp:47600 tcp:47600` (or the real Wi-Fi
   socket for Wi-Fi runs), `udreceiver view --addr ... --no-lock`, `p6:open:test`, 25 keys per run
@@ -51,8 +56,8 @@ corrects it after review.
   the coder dies or stalls (no worker child for 6 min); `picheck.py 20min` sends the periodic
   ntfy progress note. Restart both after any OpenCode server restart - a server restart kills
   the timers and the coder's child receivers (that caused a false "parallel coder" alarm).
-- **Next:** finish T13-1, verify its raw logs, then T13-2 (B-116 live proof), then the remaining
-  Phase 13 phone items in the order above. Phase 14 follows Phase 13, not before.
+- **Next:** continue the remaining Phase 13 phone proofs in the order above, then complete Phase
+  14. The deferred Controller mode is not part of the current release plan.
 
 ## Done (verified on the phone, 2026-10-14)
 
