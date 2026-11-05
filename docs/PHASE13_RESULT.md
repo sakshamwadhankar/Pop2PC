@@ -163,3 +163,34 @@ covers it - was not reproduced live. With the keyguard showing, this phone marks
 the keyguard condition. The unit test `foregroundKeyguardLockedIsWanted` covers the counter>0
 input, and T13-1's `PAIRING notification skipped: app in front` is the observed pre-fix state.
 The two live runs that did run are quoted in the B-125 fix row.
+
+## 8. T13-8 overnight closure run (2026-11-05/06, manager-verified)
+
+Run: 2026-11-05 23:36 - 2026-11-06 03:55, phone `2c0f6edc`, HEAD `f3dfadb`, no product code
+changed. Evidence: `Temp\opencode\t13-8\` (RESULT.txt, pics\, raw receiver logs, conn/lat/npp
+JSONs). All performance numbers thermal 0, desk 1728x1080, USB adb forward, real SendInput
+product path. The manager re-derived the headline numbers from the raw logs before recording
+(NPP median 12.60 s from `nppstarts.json`; drag 45.4/54.0 fps from `drag-vstat.json`; connect
+0.104 s window / 1.139 s first frame from `conntimes.json`; the real-thermal-3 GOVERNOR ladder
+is verbatim in `logcat-full.log` at 00:01:00-09).
+
+| Item | Result | Evidence |
+|---|---|---|
+| Files proofs (B-118/B-119 follow-up) | PASS - delete modal + Cancel + Delete, rename keeps the typed extension, 5 invalid rename names refused with a message, new-folder prompt with refusals, folder single-click selects / double-click opens | `pics\i2-*`, logcat `FILES ...` lines |
+| B-121 Back regression | PASS - Settings -> Back returns to the app home, app stays resumed | `pics\i3-1`, `i3-2` |
+| B-120 focus regression | PASS - 66 s zero-input poll, 33/33 foreground, 0 reclaim lines (old bug: 171 reclaims in ~6 min) | `focus-poll-i3.log`, `view5.out.log` |
+| D12 toasts | PASS - "Copied" via the real clipboard path (no focus steal, auto-dismiss ~2 s); "Rename failed" also captured | `pics\i4-1`, `i4-2`, `i2-11` |
+| D14 welcome card | PASS - appears once on a fresh session, Files shortcut opens the app, dismissal persists across a reconnect (`welcome_done` pref) | `pics\i4-3..i4-8` |
+| Connect time | PASS - window 0.104 s / first frame 1.139 s median (5 fresh sessions; target 5 s) | `conntimes.json`, `conn1-5.log` |
+| Typing LATSTAGE (3x25 keys each) | test shell p50 96.4-126.9 ms (target 80 MISS; Phase 12 recorded 81.7); Browser 109.8-122.0; NPP 96.5-124.2; VS Code editor FAIL (B-128: keys reach the Chat input, not the editor) | `lat-*.json`, `typing-testshell.log` |
+| Notepad++ start | 12.60 s median (n=5, fresh session + closed window each; target 10 MISS; Phase 12 recorded 10.45) | `nppstarts.json` |
+| Drag fps | 45.4 avg / 54.0 max, rx 9694 kbit/s, decode 4.25 ms, dropped 0 (target >= 30 PASS) | `drag-run.log`, `drag-vstat.json` |
+| D22 hot-stage (T13-7) | NOT PROVEN - the framework override never reaches the governor (B-127) and the 35-min real-heat box did not reach thermal 3; the real-heat ladder exists verbatim in `logcat-full.log` (00:01:00-09) and `files/p4/p4.log` (19:11) | `RESULT.txt` §4 |
+
+Honest caveats (recorded, not tuned away): the phone was locked / screen-off during the typing
+runs, the laptop was under owner interactive load, and two receiver windows were closed
+externally mid-run. Tonight's p50s sit 15-45 ms above Phase 12's same-build numbers, so the
+Phase 12 records (81.7 ms / 10.45 s) remain the formal numbers until a screen-on re-take.
+Cleanup verified by the manager: override 0, screen_off_timeout 1800000 (system table),
+stay_on 0, 0 app processes, 0 wine/Xvfb, 0 receivers, 0 forwards, Wi-Fi off (as found), no
+call, git tree clean apart from TODO.md.

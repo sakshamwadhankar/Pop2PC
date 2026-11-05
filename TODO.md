@@ -1,4 +1,4 @@
-Done 12 of 14. Updated 01:25. Now: T13-6 Box64 16 KB result=shipped, next manager decision.
+T13-8: done 8 of 8, manager-reviewed 2026-11-06 (numbers re-derived from raw logs, docs updated, B-127/B-128 logged). Now: T13-9 (B-128 fix + D22 real-heat proof), then Phase 14 needs the product name (DECISIONS D12).
 
 # Night run: Phase 12 finish + Phase 13 polish
 

@@ -6,12 +6,12 @@ corrects it after review.
 
 ## Now
 
-- **Position (2026-11-04, manager review): Phase 12 is measured and recorded; Phase 13 is
-  running; Phase 14 not started.** The committed branch is synchronized with `origin/main`
-  through the controller-mode planning checkpoint; the current B-117 documentation records the
-  16 KB Box64 artifact verified in this session. Unrelated manager handover files remain
-  untracked and were deliberately excluded.
-  Everything below is `phone`-verified on `2c0f6edc` unless marked otherwise.
+- **Position (2026-11-06, manager review): Phase 13 is nearly closed - the T13-8 overnight run
+  cleared every remaining UX proof and took the final phone round; B-127 (thermal override
+  invisible to the governor) and B-128 (VS Code editor typing) are the only open items, and
+  Phase 14 has not started.** HEAD `f3dfadb` plus the T13-8 docs commit; the working tree is
+  clean apart from docs. Everything below is `phone`-verified on `2c0f6edc` unless marked
+  otherwise.
 - **Phase 12 round 4 (2026-11-01, final tree): 6 pass, 2 miss.**
   - PASS: connect 0.944 s; Wi-Fi typing **p50 107.1 / p90 119.6 ms** (n=100, 5 GHz, no adb
     forward); moving-window fps 42.0; VS Code 13.48 s cold; old-PC 1080p proxy; governor drop.
@@ -41,8 +41,18 @@ corrects it after review.
   presented with 0 dropped, and real PC input typed `b117ok`. Thermal Status stayed 3, so no
   performance number is claimed; the phone is 4 KB-page and the 16 KB result is ELF/APK
   verified rather than physical-16-KB-device verified. Evidence: `Temp\opencode\t13-6\RESULT5.txt`.
-- **Next Phase 13 work:** D12 desktop toasts, D14 welcome card, Files/Back/focus, D22 thermal-3,
-  and the final phone round. Phase 14 follows Phase 13.
+- **T13-8 overnight (2026-11-05/06, manager-verified from raw evidence):** Files
+  delete/rename/new-folder/select/open, B-121 Back, B-120 focus (66 s, 33/33, 0 reclaims), D12
+  toasts and the D14 welcome card all PASS live; connect 0.104 s window / 1.139 s first frame;
+  drag fps 45.4/54.0 dropped 0; NPP start 12.60 s median and typing p50s 96.4-126.9 ms recorded
+  with honest caveats (locked/screen-off phone, owner PC load) - the Phase 12 records (81.7 ms /
+  10.45 s) stay the formal numbers. D22 live hot-stage NOT PROVEN: the framework override never
+  reaches the governor (**B-127**, new), and the VS Code editor typing gate is blocked by
+  **B-128** (new). Evidence: `Temp\opencode\t13-8\RESULT.txt`.
+- **Next Phase 13 work:** T13-9 - the B-128 fix plus the VS Code editor typing proof, and the
+  D22 real-heat hot-stage proof (real thermal 3 is reachable: charging + ~25 min streaming fired
+  the ladder at 00:01; the framework override cannot, B-127). Phase 14 follows Phase 13 and needs
+  the product name (DECISIONS D12 - the owner picks it; the coder never invents one).
 - **Deferred post-launch plan (2026-11-04):** `PLAN.md` now records an optional Controller mode
   for controlling the PC from the phone, including app control, touchpad/keyboard, explicit
   clipboard transfer, media/system controls, capture and signature features. It is explicitly
