@@ -8,8 +8,10 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
@@ -1193,6 +1195,33 @@ object CodeServerGate {
 }
 
 /**
+ * The B-039/B-128 key-routing decision, pure so it is unit-tested: which route one PC key
+ * event takes. Printable characters go through Chromium's own input connection (the IME
+ * route an EditContext accepts); everything else stays a real key event so shortcuts keep
+ * working; the UP of a committed key is swallowed so Chromium never sees a bare release.
+ */
+internal object KeyRoute {
+    enum class Route { SWALLOW, COMMIT, RAW }
+
+    fun decide(action: Int, keyCode: Int, meta: Int, lastCommitted: Int, ch: Char): Route =
+        when {
+            action == KeyEvent.ACTION_UP && keyCode == lastCommitted -> Route.SWALLOW
+            action == KeyEvent.ACTION_DOWN &&
+                (meta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON)) == 0 &&
+                ch != '\u0000' -> Route.COMMIT
+            else -> Route.RAW
+        }
+}
+
+/**
+ * The B-128 rebind decision, pure so it is unit-tested: a pointer RELEASE inside the
+ * WebView may have moved the renderer's focused editable, so the IME must be rebound.
+ */
+internal object ImeRebind {
+    fun afterClick(actionMasked: Int): Boolean = actionMasked == MotionEvent.ACTION_UP
+}
+
+/**
  * B-039: a WebView that reports window focus. Printable characters go through Chromium's own
  * input connection (the IME route an EditContext accepts); everything else stays a real key
  * event so shortcuts keep working.
@@ -1217,6 +1246,27 @@ class KeyWebView(context: Context) : WebView(context) {
         if (!isFocused) requestFocus()
     }
 
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val handled = super.onTouchEvent(event)
+        // B-128: a click moves the renderer's DOM focus (verified live: after clicking the
+        // Monaco editor document.activeElement is the editor's DIV.native-edit-context), but
+        // Chromium's InputConnection keeps serving the editable the IME attached to last -
+        // commitText wrote into the Copilot Chat textarea while the caret sat in the editor.
+        // The key path calls onCreateInputConnection directly (no InputMethodManager), so
+        // nothing restarts the attachment when the focus changes. restartInput drops the
+        // stale attachment; the next key's onCreateInputConnection re-attaches to the
+        // editable that is focused NOW (the editor) - and clicks that target an editable
+        // (the Chat textarea itself) re-attach to it the same way.
+        if (ImeRebind.afterClick(event.actionMasked)) {
+            val imm = context.getSystemService(InputMethodManager::class.java)
+            if (imm != null) {
+                imm.restartInput(this)
+                android.util.Log.i("Phase6", "B039 rebind after click")
+            }
+        }
+        return handled
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // B-039 (found 19:12): VS Code 1.141's editor is an EditContext, not a textarea. Raw
         // keydowns reach the page (Ctrl+P opens Quick Open, the New File box takes text), but
@@ -1224,14 +1274,14 @@ class KeyWebView(context: Context) : WebView(context) {
         // what an EditContext accepts. So printable characters go through the input connection
         // only - never both, or a textarea would get each char twice - while Ctrl/Alt
         // shortcuts, Enter, Backspace, Tab and arrows stay real key events (Ctrl+S, Ctrl+P
-        // keep working).
-        if (event.action == KeyEvent.ACTION_UP && event.keyCode == lastCommitted) {
-            lastCommitted = -1
-            return true
-        }
-        if (event.action == KeyEvent.ACTION_DOWN && !event.isCtrlPressed && !event.isAltPressed) {
-            val ch = Phase5Protocol.keyCodeToChar(event.keyCode, event.metaState)
-            if (ch != '\u0000') {
+        // keep working). The decision is KeyRoute (unit-tested); the code below executes it.
+        val ch = Phase5Protocol.keyCodeToChar(event.keyCode, event.metaState)
+        when (KeyRoute.decide(event.action, event.keyCode, event.metaState, lastCommitted, ch)) {
+            KeyRoute.Route.SWALLOW -> {
+                lastCommitted = -1
+                return true
+            }
+            KeyRoute.Route.COMMIT -> {
                 // Chromium's connection, not a BaseInputConnection: only this one knows the
                 // focused DOM editable (or EditContext). The old override returned a plain
                 // BaseInputConnection, which cannot reach the page at all.
@@ -1241,10 +1291,10 @@ class KeyWebView(context: Context) : WebView(context) {
                     android.util.Log.i("Phase6", "B039 route=ime ch='$ch' ic=${ic.javaClass.simpleName}")
                     return true
                 }
-                // B-078: VS Code's editor is an EditContext and exposes no InputConnection on
-                // this WebView (ic=null after the editor gets the focus), so PC text died here.
-                // Drive the page's own insertText instead - the same operation the IME performs
-                // one layer up - one character per PC key press.
+                // B-078: older VS Code exposed no InputConnection for the EditContext
+                // (ic=null after the editor got the focus), so PC text died here. Drive the
+                // page's own insertText instead - the same operation the IME performs one
+                // layer up - one character per PC key press.
                 evaluateJavascript(
                     "document.execCommand('insertText',false," +
                         org.json.JSONObject.quote(ch.toString()) + ")",
@@ -1254,8 +1304,8 @@ class KeyWebView(context: Context) : WebView(context) {
                 android.util.Log.i("Phase6", "B039 route=js-insert ch='$ch'")
                 return true
             }
+            KeyRoute.Route.RAW -> return super.dispatchKeyEvent(event)
         }
-        return super.dispatchKeyEvent(event)
     }
 }
 
