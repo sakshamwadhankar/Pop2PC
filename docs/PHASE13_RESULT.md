@@ -194,3 +194,35 @@ Phase 12 records (81.7 ms / 10.45 s) remain the formal numbers until a screen-on
 Cleanup verified by the manager: override 0, screen_off_timeout 1800000 (system table),
 stay_on 0, 0 app processes, 0 wine/Xvfb, 0 receivers, 0 forwards, Wi-Fi off (as found), no
 call, git tree clean apart from TODO.md.
+
+## 9. T13-9 closure run (2026-11-06/07, manager-verified)
+
+Run: 2026-11-06 21:43 - 2026-11-07 00:05, phone `2c0f6edc`, HEAD `a4e9992`, product code
+changed ONLY in the B-128 path (`Phase6Apps.kt` + new `Phase6KeyRouteTest.kt`). Evidence:
+`Temp\opencode\t13-9\` (RESULT.txt, D22-RESULT.txt, raw logs, scripts, PNGs). The manager
+re-derived the headline numbers from the raw JSONs/logs before recording and read the fix
+diff.
+
+| Item | Result | Evidence |
+|---|---|---|
+| B-128 fix | **FIXED, phone-verified, committed** - reproduce first, then `InputMethodManager.restartInput` on pointer UP (`ImeRebind` + `KeyRoute.decide`, 9 unit tests); probe lands in the Monaco editor, Chat path intact; Copilot Chat not disabled | `fix-1-probe.png`, `fix-2-chat.png`, `logcat-b128.log`, `Phase6KeyRouteTest` |
+| VS Code editor typing gate | **CLOSED** - 3x25 keys in-editor (click line 1 -> type -> Ctrl+S), text on screen and on disk per run, LATSTAGE p50 108.0/116.8/103.6, p90 121.5/152.1/117.5, thermal 0 throughout | `item3-run1/2/3.png`, `lat-vscode-editor.json`, disk substrings `b128edtyp25run{1,2,3}proofcheck` |
+| B-103 paste | NOT FIXED in the 90-min box; isolated much further: serve path PROVEN to wine (TARGETS + STRING served; wine re-acquires from us after SelectionClear); blockers = (a) Android background-clipboard-read policy (phone-side) and (b) wine Ctrl+V never converts (wine-side); our malformed format=32 TARGETS replies filed as **B-130** | `b103-*.png`, `logcat-b128.log` P11X11CLIP lines |
+| Screen-on re-take | connect window 0.130 s / first frame 1.158 s medians (5 fresh sessions; target 5 s PASS); typing best p50 **82.2 (NPP) / 84.7 (test shell)** vs 80 MISS; Browser 113.3-143.4; VS Code editor 108.1-118.7; NPP start **21.03 s** median (screen-on workbench contention; target 10 MISS); drag fps 42.3/49.0, rx 3493 kbit/s, decode 3.47 ms, dropped 0 (PASS) | `conntimes.json`, `lat-i5.json`, `nppstarts.json`, `drag-i5.json`, `view-item5.out.log` |
+| D22 hot-stage | NOT PROVEN - 204 drag cycles / 45.2 min on USB power, thermal 0 in every poll, dropped=0, no GOVERNOR lines; baseline recorded (42.3 fps avg, NPP rect 258,223,1209,681, `-> phone display 1728x1080`) | `D22-RESULT.txt`, `thermal-poll-i6.log` |
+
+Proposed bugs filed by the manager: **B-129** (Monaco Ctrl+A insert-not-replace, minor),
+**B-130** (format=32 ChangeProperty length bug, minor, prime suspect for the wine paste
+half). Owner-guard incidents recorded by the coder (owner on call 21:45-21:59; one PIN
+attempt at 22:03 while the owner had just opened an app - the typed digits landed nowhere;
+owner's PC clipboard overwritten twice by clipboard-pipeline test markers). Final gates:
+Android 233/0/3 + lint + assemble, cargo 103/0 (the first close-out cargo run failed on the
+receiver's `Local\udreceiver-lock-single` mutex - stopped the session, re-ran clean; no
+product change involved), clippy 0, diff-check 0. Cleanup verified: stay_on 0, timeout
+1800000, 0 app processes, 0 receivers, 0 forwards, Wi-Fi as found, workspace README.md
+restored, gradle daemon stopped.
+
+Verdict: **PHASE 13 NOT COMPLETE** - remaining: (1) B-103 Android->Wine clipboard paste
+(T13-10 plan: B-130 fix + focus-gain re-read + end-to-end retest), (2) the D22 live
+hot-stage proof (manager-approved debug injection per the B-127 decision, real-heat
+multi-window attempt alongside).

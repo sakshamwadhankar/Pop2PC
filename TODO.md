@@ -1,4 +1,4 @@
-T13-8: done 8 of 8, manager-reviewed 2026-11-06 (numbers re-derived from raw logs, docs updated, B-127/B-128 logged). Now: T13-9 (B-128 fix + D22 real-heat proof), then Phase 14 needs the product name (DECISIONS D12).
+T13-9: done 7 of 7, manager-reviewed 2026-11-07 (B-128 fix verified and committed; B-110 closed; B-129/B-130 filed; docs updated). Now: T13-10 (B-130 fix + B-103 focus-gain re-read + paste retest + D22 debug-injection proof), then Phase 14 needs the product name (DECISIONS D12).
 
 # Night run: Phase 12 finish + Phase 13 polish
 

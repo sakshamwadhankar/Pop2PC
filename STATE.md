@@ -6,12 +6,12 @@ corrects it after review.
 
 ## Now
 
-- **Position (2026-11-06, manager review): Phase 13 is nearly closed - the T13-8 overnight run
-  cleared every remaining UX proof and took the final phone round; B-127 (thermal override
-  invisible to the governor) and B-128 (VS Code editor typing) are the only open items, and
-  Phase 14 has not started.** HEAD `f3dfadb` plus the T13-8 docs commit; the working tree is
-  clean apart from docs. Everything below is `phone`-verified on `2c0f6edc` unless marked
-  otherwise.
+- **Position (2026-11-07, manager review): Phase 13 is two items from closed - after T13-9,
+  B-128 is FIXED and committed (the VS Code editor typing gate is closed), and the only
+  remaining work is B-103 (Android->Wine clipboard paste; blockers isolated, T13-10 plan
+  ready) and the D22 live hot-stage proof (debug injection approved per the B-127 decision).
+  Phase 14 has not started and still needs the product name (DECISIONS D12).** Everything
+  below is `phone`-verified on `2c0f6edc` unless marked otherwise.
 - **Phase 12 round 4 (2026-11-01, final tree): 6 pass, 2 miss.**
   - PASS: connect 0.944 s; Wi-Fi typing **p50 107.1 / p90 119.6 ms** (n=100, 5 GHz, no adb
     forward); moving-window fps 42.0; VS Code 13.48 s cold; old-PC 1080p proxy; governor drop.
@@ -49,10 +49,23 @@ corrects it after review.
   10.45 s) stay the formal numbers. D22 live hot-stage NOT PROVEN: the framework override never
   reaches the governor (**B-127**, new), and the VS Code editor typing gate is blocked by
   **B-128** (new). Evidence: `Temp\opencode\t13-8\RESULT.txt`.
-- **Next Phase 13 work:** T13-9 - the B-128 fix plus the VS Code editor typing proof, and the
-  D22 real-heat hot-stage proof (real thermal 3 is reachable: charging + ~25 min streaming fired
-  the ladder at 00:01; the framework override cannot, B-127). Phase 14 follows Phase 13 and needs
-  the product name (DECISIONS D12 - the owner picks it; the coder never invents one).
+- **T13-9 (2026-11-06/07, manager-verified from raw evidence): B-128 FIXED and committed** -
+  `KeyWebView.onTouchEvent` restarts the IME input on every pointer UP (pure `ImeRebind` +
+  `KeyRoute.decide`, 9 unit tests); `probe` lands in the Monaco editor while the Chat path
+  still works; gates 233/0/3, cargo 103/0, clippy 0. **The VS Code editor typing gate is
+  CLOSED**: 3x25 keys in-editor, on screen and on disk, p50 103.6-116.8 at thermal 0.
+  Screen-on re-take: connect 0.130/1.158 s; typing best p50 82.2/84.7 vs 80 (best on this
+  tree, still a miss); NPP start 21.03 s (screen-on contention); drag 42.3/49.0 fps dropped 0.
+  **B-103 not fixed but isolated**: serve path proven to wine; blockers are the Android
+  background-clipboard-read policy (phone-side) and a paste conversion that never starts
+  (wine-side; our malformed format=32 TARGETS replies - new **B-130** - are the prime
+  suspect). New **B-129** (Monaco Ctrl+A inserts). D22 real heat not reached again (204
+  drags / 45.2 min on USB power, thermal 0). Evidence: `Temp\opencode\t13-9\RESULT.txt`.
+- **Next Phase 13 work:** T13-10 - fix **B-130** (format=32 ChangeProperty length), add the
+  manager-approved focus-gain clipboard re-read for B-103's phone-side half, retest the
+  B-103 paste end-to-end, and close the D22 paired-proof via the debug-only thermal injection
+  (B-127 decision) with a real-heat multi-window attempt alongside. Phase 14 follows Phase 13
+  and needs the product name (DECISIONS D12 - the owner picks it; the coder never invents one).
 - **Deferred post-launch plan (2026-11-04):** `PLAN.md` now records an optional Controller mode
   for controlling the PC from the phone, including app control, touchpad/keyboard, explicit
   clipboard transfer, media/system controls, capture and signature features. It is explicitly
