@@ -459,10 +459,58 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         setPadding(10, 3, 10, 3)
     }
 
-    /** B-082: the desktop Chrome UA, kept out of WebSettings so the fetch thread can use it. */
-    private val desktopUa =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    /**
+     * T14-3 item 4: the fallback WebView's desktop UA matches the DEVICE WebView's major
+     * version ([Phase14BrowserPolicy.desktopChromeUa]), so a robot wall that compares the
+     * claimed Chrome against the engine's real capabilities sees a consistent pair. Kept
+     * out of WebSettings so the fetch thread can reuse the same string.
+     */
+    private val desktopUa: String by lazy {
+        val v = try {
+            android.webkit.WebView.getCurrentWebViewPackage()?.versionName
+        } catch (_: Throwable) { null }
+        android.util.Log.i("Phase6", "B132 fallback UA webview=$v")
+        Phase14BrowserPolicy.desktopChromeUa(v)
+    }
+
+    /**
+     * T14-3 item 4 — the fallback engine's robot-wall posture, every setting documented.
+     * A bare cookie-less WebView is fingerprinted as a bot (B-132); a desktop browser is
+     * a normal visitor. The WebView stays the automatic fallback when GeckoView cannot
+     * init, so it gets the same treatment the Gecko engine has (UA_MODE_DESKTOP +
+     * persistent profile).
+     */
+    private fun applyFallbackPosture(settings: android.webkit.WebSettings) {
+        // JS on: the desktop web requires it, and its absence is a robot signal (B-065).
+        settings.javaScriptEnabled = true
+        // DOM storage on: sites expect localStorage/sessionStorage to work.
+        settings.domStorageEnabled = true
+        // Desktop window size in JS (outerWidth/outerHeight): a mobile-sized window with a
+        // desktop UA is another fingerprint mismatch.
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        // The Phase-3 settings that rendered code-server (B-065); media + file-access parity.
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        settings.mediaPlaybackRequiresUserGesture = false
+        // FIRST-PARTY cookies: enabled (the platform default, made explicit) and PERSISTED -
+        // CookieManager is disk-backed, so cookies/logins survive app restarts, and a
+        // returning visitor with an established cookie jar is exactly not a fresh bot.
+        // flush() pushes the jar to disk at the moments the process could die.
+        android.webkit.CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+        }
+        // THIRD-PARTY cookies: left at the PLATFORM DEFAULT (no setAcceptThirdPartyCookies
+        // call). WebViews accept them by default; Chrome-like behaviour is the goal and an
+        // override would itself be a deviation worth fingerprinting.
+        // DNT: the WebView has no DNT setting and never sends the header by default - the
+        // desktop-Chrome default (off) is what sites see. Nothing to set.
+        // NO CLEARING on exit: the app never calls clearCookies/clearHistory/removeAllCookies
+        // (verified by grep this task); wiping state on close is a privacy-incognito
+        // fingerprint AND loses the login state a real visitor accumulates.
+        // UA: set by the caller ([desktopUa]) - it needs the device WebView version, which
+        // is read once per window.
+    }
 
     /** Phase 11 D-e: the getUserMedia shim, injected into every main-frame HTML response. */
     private val shimJs: String by lazy {
@@ -482,13 +530,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
             context.resources.displayMetrics.density + " dpi=" +
             context.resources.displayMetrics.densityDpi)
         setBackgroundColor(if (codeServer) Color.WHITE else Theme.SURFACE)
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        // The Phase-3 settings that rendered code-server (B-065); the shell Browser was
-        // missing media + file-access parity.
-        settings.allowFileAccess = false
-        settings.allowContentAccess = false
-        settings.mediaPlaybackRequiresUserGesture = false
+        applyFallbackPosture(settings)
         // B-082: Play Store sends an Android WebView to intent://, which this Browser cannot
         // load. A desktop Chrome UA keeps it on https (and gives sites their desktop page).
         if (!codeServer) {
@@ -542,6 +584,9 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
                     val pageTitle = v?.title?.takeIf { it.isNotBlank() && it != "about:blank" }
                     tab.title = (pageTitle ?: android.net.Uri.parse(url).host ?: url).take(18)
                     address.setText(url)
+                    // T14-3 item 4: push the cookie jar to disk here too - a page-load
+                    // boundary is the safest moment a process could die after.
+                    if (!codeServer) android.webkit.CookieManager.getInstance().flush()
                     refreshTabs()
                 }
                 v?.evaluateJavascript(

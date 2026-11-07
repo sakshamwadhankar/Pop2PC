@@ -155,10 +155,97 @@ object Phase2Data {
     private fun download(ctx: Context, url: String, sha: String, name: String): File =
         download(downloadsDir(ctx), url, sha, name)
 
+    // ---------- B-133 residual: HTTP-Range resume (T14-3) ----------
+    //
+    // The phone's route to GitHub reset mid-download five times over one 102 MB wine
+    // tarball (T14-2 log: ProtocolException "unexpected end of stream", "gave up after
+    // 3 attempts"). Every retry used to restart from byte 0, so the file never finished.
+    // Now a partial file is kept and the next attempt sends Range: bytes=<len>-; a 206
+    // with a matching Content-Range appends, a 200 (or a mismatched echo) restarts clean
+    // exactly like before. Redirects are followed MANUALLY (github.com 302s to
+    // objects.githubusercontent.com) because HttpURLConnection does not forward custom
+    // headers like Range across an automatic cross-host redirect - a silently dropped
+    // Range would look like "server refused ranges" and restart forever.
+
+    /** The Range request header for [offset]; null for offset 0 (a clean first GET). */
+    fun rangeHeader(offset: Long): String? = if (offset > 0) "bytes=$offset-" else null
+
+    /** The 3xx codes the manual redirect follows (306 is unused/historic). */
+    fun isRedirect(code: Int): Boolean = code in 301..308 && code != 306
+
+    /** Start offset of a Content-Range header ("bytes 123-456/789" -> 123), else null. */
+    fun parseContentRangeStart(header: String?): Long? {
+        val h = header?.trim() ?: return null
+        if (!h.startsWith("bytes ")) return null
+        return h.removePrefix("bytes ").substringBefore('-').trim().toLongOrNull()
+    }
+
+    /**
+     * The offset to (re)start the body read at, given the bytes already on disk, the
+     * response code and the echoed Content-Range start. Pure, unit-tested:
+     *   206 + matching echo -> keep the partial (resume);
+     *   206 with a missing/mismatched echo -> 0 (the server ignored the Range);
+     *   anything else (200 ranges-refused, 416, ...) -> 0 (restart clean, old behaviour).
+     */
+    fun resumeOffset(partial: Long, code: Int, contentRangeStart: Long?): Long = when {
+        code == 206 && contentRangeStart != null && contentRangeStart == partial -> partial
+        else -> 0L
+    }
+
+    /** Resume attempts inside one download() call before giving up (each resumes; T14-2 saw 5 resets). */
+    const val MAX_DL_ATTEMPTS = 30
+
+    private fun fetchInto(out: File, url: String, partial: Long, name: String, log: (String) -> Unit): Long {
+        var target = url
+        var redirects = 0
+        while (true) {
+            val conn = URL(target).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 30_000
+            conn.readTimeout = 120_000
+            conn.instanceFollowRedirects = false
+            rangeHeader(partial)?.let { conn.setRequestProperty("Range", it) }
+            val code = conn.responseCode
+            if (isRedirect(code)) {
+                val loc = conn.getHeaderField("Location")
+                    ?: throw java.io.IOException("redirect $code without Location")
+                try { conn.inputStream?.close() } catch (_: Throwable) {}
+                target = java.net.URL(java.net.URL(target), loc).toString()
+                redirects++
+                if (redirects > 5) throw java.io.IOException("more than 5 redirects")
+                continue
+            }
+            if (code >= 400) throw java.io.IOException("HTTP $code for $name")
+            val offset = resumeOffset(partial, code, parseContentRangeStart(conn.getHeaderField("Content-Range")))
+            val resume = code == 206 && offset == partial && partial > 0
+            val total: Long = if (resume) {
+                log("DL $name resume offset=$offset (HTTP $code)")
+                conn.inputStream.use { src ->
+                    java.io.FileOutputStream(out, true).use { dst -> src.copyTo(dst, 1 shl 16) }
+                }
+                // The 206's Content-Range total, when the server gave one.
+                conn.getHeaderField("Content-Range")?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
+            } else {
+                if (partial > 0) log("DL $name ranges refused (HTTP $code) -> restart clean")
+                conn.inputStream.use { src ->
+                    java.io.FileOutputStream(out).use { dst -> src.copyTo(dst, 1 shl 16) }
+                }
+                conn.contentLengthLong.takeIf { it >= 0 } ?: -1L
+            }
+            conn.disconnect()
+            return total
+        }
+    }
+
     /**
      * Download [url] into [dir] as [name] with a cache + SHA-256 check. Phase 2 (win86)
      * and Phase 3 (code-server, item 5) share this; [log] keeps each phase's evidence in
      * its own log file (Phase 2 passes nothing, Phase 3 passes Phase3Native::say).
+     *
+     * B-133 residual: a partial file from an interrupted attempt is NOT deleted any more;
+     * each attempt resumes from its length when the server answers the Range with 206
+     * ([resumeOffset]), and restarts clean when it refuses. A sha-verified complete file
+     * is still a cache hit. Throws after [MAX_DL_ATTEMPTS] attempts or two attempts in a
+     * row with zero progress, keeping the partial for the next call.
      */
     internal fun download(
         dir: File,
@@ -172,16 +259,45 @@ object Phase2Data {
         if (out.exists() && out.length() > 0) {
             val got = sha256(out)
             if (got == sha) { log("DL $name cached sha ok"); return out }
-            log("DL $name cached sha MISMATCH -> redownload")
-            out.delete()
+            // B-133 residual: keep the partial - the fetch below resumes it when the
+            // server honours Range; it is truncated only when the server refuses.
+            log("DL $name cached sha MISMATCH (${out.length()} B on disk) -> resume/restart")
         }
         val t = System.currentTimeMillis()
-        URL(url).openStream().use { src ->
-            FileOutputStream(out).use { dst -> src.copyTo(dst, 1 shl 16) }
+        var attempts = 0
+        var lastProgressAt = -1L
+        var stalled = 0
+        while (true) {
+            attempts++
+            val partial = if (out.exists()) out.length() else 0L
+            try {
+                val total = fetchInto(out, url, partial, name, log)
+                // A cut-off read does NOT always throw: on the desktop JVM an early EOF
+                // returns a short body normally (Android throws ProtocolException
+                // "unexpected end of stream", T14-2). A body shorter than the total the
+                // server promised is an interrupted attempt -> retry with resume.
+                val now = out.length()
+                if (total > 0 && now < total) {
+                    log("DL $name cut off at $now of $total (no exception) -> retry with resume")
+                    throw java.io.IOException("short body $now of $total")
+                }
+            } catch (t: Throwable) {
+                val now = if (out.exists()) out.length() else 0L
+                if (t is IllegalStateException) throw t // the final sha check - real corruption
+                log("DL $name interrupted at $now after attempt $attempts (${t.javaClass.simpleName}: ${t.message?.take(120)})")
+                stalled = if (now == lastProgressAt) stalled + 1 else 0
+                lastProgressAt = now
+                if (attempts >= MAX_DL_ATTEMPTS || stalled >= 2) {
+                    log("DL $name gave up after $attempts attempts (partial $now B kept for the next call)")
+                    throw t
+                }
+                continue
+            }
+            break
         }
         val got = sha256(out)
         val ms = System.currentTimeMillis() - t
-        log("DL $name bytes=${out.length()} ms=$ms sha=$got")
+        log("DL $name bytes=${out.length()} ms=$ms sha=$got attempts=$attempts")
         check(got == sha) { "sha mismatch for $url: got $got want $sha" }
         return out
     }

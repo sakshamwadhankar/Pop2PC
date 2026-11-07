@@ -247,7 +247,12 @@ object Phase5Protocol {
             0x14 -> 115     // CAPITAL -> CAPS_LOCK
             0x2D -> 124     // INSERT
             0xBA -> 74      // OEM_1 ';' -> SEMICOLON
-            0xBB -> 81      // OEM_PLUS '=' -> EQUALS
+            // B-135: VK_OEM_PLUS (the '=' key on a US layout) must be KEYCODE_EQUALS (70).
+            // It used to send 81, which is KEYCODE_PLUS - a dedicated '+' key whose
+            // framework keymap types '+' in both states, so every raw-dispatch path (the
+            // Browser address bar) typed '+' when the user typed '='. Paths that resolve
+            // the character themselves (keyCodeToChar) were unaffected.
+            0xBB -> 70      // OEM_PLUS '=' -> EQUALS
             0xBC -> 55      // OEM_COMMA ',' -> COMMA
             0xBD -> 69      // OEM_MINUS '-' -> MINUS
             0xBE -> 56      // OEM_PERIOD '.' -> PERIOD
@@ -283,7 +288,8 @@ object Phase5Protocol {
         if (keyCode == 62) return ' '
         return when (keyCode) {
             74 -> if (shift) ':' else ';'      // SEMICOLON
-            81 -> if (shift) '+' else '='      // EQUALS
+            70 -> if (shift) '+' else '='      // EQUALS (B-135: the '=' key, VK_OEM_PLUS)
+            81 -> '+'                          // PLUS (a dedicated '+' key in both states)
             55 -> if (shift) '<' else ','      // COMMA
             69 -> if (shift) '_' else '-'      // MINUS
             56 -> if (shift) '>' else '.'      // PERIOD

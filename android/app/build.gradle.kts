@@ -60,6 +60,10 @@ android { namespace = "dev.unifieddesktop.app"
 dependencies {
     implementation(project(":engine"))
     implementation("org.tukaani:xz:1.10")
+    // B-136 (d): NotificationCompat.MediaStyle for the session-audio notification; the
+    // MediaStyle binding to the active MediaSession is what raises the session's priority
+    // so background media-volume commands are honoured. Apache-2.0, THIRD_PARTY.md.
+    implementation("androidx.media:media:1.7.0")
     // B-132: the desktop Browser's engine (Firefox 159.0 release; MPL-2.0, see
     // THIRD_PARTY.md). arm64 only so the AAB stays under 200 MB; other ABIs fall back
     // to the WebView engine at runtime.

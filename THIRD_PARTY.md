@@ -37,6 +37,7 @@ and its phone proof remain historical evidence. The binary stays outside git;
 | Kotlin | AGP 9.4.1 built-in compiler (2.2.x); no explicit kotlin-stdlib pin — the round-1 pin to 2.4.21 broke the build (metadata too new for the bundled compiler) | Apache-2.0 | App language/compiler and stdlib | https://github.com/JetBrains/kotlin |
 | Android NDK | 26.1.10909125 (NDK 29 rejected Dobby's arm64 assembly) | Android SDK License Agreement | Native hook compile | https://developer.android.com/ndk |
 | AndroidX (appcompat, annotation and transitive AndroidX libraries) | engine declared appcompat 1.2.0; resolved versions to be reported | Apache-2.0 | Engine Android compatibility helpers | https://android.googlesource.com/platform/frameworks/support/ |
+| AndroidX media (androidx.media:media) | 1.7.0 (Maven Central, declared directly in `android/app/build.gradle.kts`, T14-3 B-136) | Apache-2.0 | `NotificationCompat.MediaStyle` for the session-audio notification (B-136 d): an ongoing MediaStyle notification bound to the active MediaSession is what raises the session's priority so background media-volume commands are honoured | https://developer.android.com/jetpack/androidx/releases/media |
 | Material Components Android | 1.3.0 (engine declaration) | Apache-2.0 | Engine dependency | https://github.com/material-components/material-components-android |
 | toml4j | 0.7.2 | MIT | Engine configuration parsing | https://github.com/mwanji/toml4j |
 | Gson (toml4j dependency) | 2.3.1 (declared transitively) | Apache-2.0 | TOML conversion | https://github.com/google/gson |

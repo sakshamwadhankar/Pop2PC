@@ -74,11 +74,11 @@ object Phase2Box64 {
             pb.environment()["BOX64_LOG"] = "1"
             val start = System.currentTimeMillis()
             val p = pb.start()
-            say("GUEST pid=${p.pid()} started")
+            say("GUEST pid=${p.reflectedPid()} started")
             // While the guest runs, prove no code was executed from app storage:
             // for every process we start, readlink /proc/<pid>/exe must be under
             // nativeLibraryDir (G3).
-            val exe = try { File("/proc/${p.pid()}/exe").canonicalFile.path } catch (t: Throwable) { "ERR $t" }
+            val exe = try { File("/proc/${p.reflectedPid()}/exe").canonicalFile.path } catch (t: Throwable) { "ERR $t" }
             say("GUEST_EXE proc/exe=$exe nativeDir=${context.applicationInfo.nativeLibraryDir}")
             val badPath = !exe.startsWith(context.applicationInfo.nativeLibraryDir)
             say("GUEST_EXE underNativeLibraryDir=${!badPath}")
@@ -101,5 +101,11 @@ object Phase2Box64 {
     }
 }
 
-private fun Process.pid(): Long =
+/**
+ * T14-3: named `reflectedPid` because the platform 37.2 jar now declares a member
+ * `Process#pid()` (API 37.2) that would otherwise WIN Kotlin's member-over-extension
+ * resolution and make these two calls a lint NewApi error (min SDK 29). The reflective
+ * call works on every API and is what this file always intended.
+ */
+private fun Process.reflectedPid(): Long =
     (this.javaClass.getMethod("pid").invoke(this) as? Long) ?: -1L

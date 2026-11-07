@@ -22,7 +22,11 @@ class Phase7X11KeysTest {
         assertEquals('!'.code, X11Keys.keysym(KeyEvent.KEYCODE_1, P.MOD_SHIFT))
         assertEquals(':'.code, X11Keys.keysym(KeyEvent.KEYCODE_SEMICOLON, P.MOD_SHIFT))
         assertEquals('?'.code, X11Keys.keysym(KeyEvent.KEYCODE_SLASH, P.MOD_SHIFT))
-        assertEquals('='.code, X11Keys.keysym(KeyEvent.KEYCODE_PLUS, 0))
+        // B-135: the PC '=' key arrives as KEYCODE_EQUALS (70) since the 81 (PLUS) mis-map;
+        // PLUS itself is a dedicated '+' key in both states.
+        assertEquals('='.code, X11Keys.keysym(KeyEvent.KEYCODE_EQUALS, 0))
+        assertEquals('+'.code, X11Keys.keysym(KeyEvent.KEYCODE_EQUALS, P.MOD_SHIFT))
+        assertEquals('+'.code, X11Keys.keysym(KeyEvent.KEYCODE_PLUS, 0))
         assertEquals(' '.code, X11Keys.keysym(KeyEvent.KEYCODE_SPACE, 0))
     }
 

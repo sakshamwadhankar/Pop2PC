@@ -115,4 +115,22 @@ class Phase14BrowserPolicyTest {
         assertFalse(ImeRebind.afterClick(MotionEvent.ACTION_DOWN))
         assertFalse(ImeRebind.afterClick(MotionEvent.ACTION_MOVE))
     }
+
+    // ---- T14-3 item 4: the fallback WebView's robot-wall posture ----------------------
+
+    /** The fallback UA matches the DEVICE WebView major version (a mismatch is a bot signal). */
+    @Test
+    fun fallback_ua_matches_the_device_webview_major() {
+        val ua = Phase14BrowserPolicy.desktopChromeUa("140.0.7430.61")
+        assertTrue("UA must claim the device WebView major 140, got: $ua", ua.contains("Chrome/140.0.0.0"))
+        assertTrue(ua.startsWith("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"))
+    }
+
+    @Test
+    fun fallback_ua_falls_back_to_a_sane_major_when_unreadable() {
+        assertTrue(Phase14BrowserPolicy.desktopChromeUa(null).contains("Chrome/131.0.0.0"))
+        assertTrue(Phase14BrowserPolicy.desktopChromeUa("garbage").contains("Chrome/131.0.0.0"))
+        assertTrue(Phase14BrowserPolicy.desktopChromeUa("0.1.2.3").contains("Chrome/131.0.0.0"))
+        assertTrue(Phase14BrowserPolicy.desktopChromeUa("  145.0  ").contains("Chrome/145.0.0.0"))
+    }
 }

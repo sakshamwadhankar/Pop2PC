@@ -798,6 +798,9 @@ class HomeActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // B-136 (c): a background volume restore can be silently ignored by Android; the
+        // owed volume is finished here the moment the app is foreground again.
+        SessionAudioMute.restoreOwedOnForeground(this)
         refreshConnection()
         refreshSetup(homeSetup)
         refreshSetup(settingsSetup)

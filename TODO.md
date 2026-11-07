@@ -1,4 +1,4 @@
-T14-2: done 4 of 5. Updated 13:46. Now: wine-tarball fetch attempt 1 on the phone (ETA ~14:15 at ~30 KB/s); B-131 fully proven live (160->0->160 from background, PC receives YouTube audio while phone muted); B-132 fallback proven live (gecko load-timeout -> WebView); cargo 103/0 + clippy 0 done.
+T14-3: done 6 of 6, manager-reviewed 2026-11-07 (B-135/B-136 fixed and committed; resume mechanism proven live; fallback hardened; upstream drafts ready). Now: OWNER steps - back up the keystore, upload the AAB to Play Console (docs/PLAY_LISTING.md), submit the upstream reports.
 
 # Night run: Phase 12 finish + Phase 13 polish
 

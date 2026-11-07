@@ -1,5 +1,7 @@
 package dev.unifieddesktop.app
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.media.AudioManager
 import android.media.session.MediaSession
@@ -40,6 +42,15 @@ import android.media.session.PlaybackState
  * The decisions are pure and unit-tested; [startSession]/[endSession] are the only
  * Android-side code. A hold is counted per accepted session so a trusted reconnect
  * replacing a live session never saves the muted 0 over the user's real volume.
+ *
+ * B-136 (2026-11-07): the background restore was silently ignored once and the old
+ * INDEX->ADJUST_UNMUTE fallback claimed success from a mute flag that was never set.
+ * Since this fix: (a) an INDEX restore is verified by the index read-back ONLY; (b) an
+ * unverified restore is RECORDED as the owed volume instead of being dropped; (c)
+ * [restoreOwedOnForeground] (HomeActivity.onResume) finishes an owed restore the moment
+ * the app is foreground again, and the next session start clears a stale one first; (d)
+ * the held MediaSession is bound to an ongoing MediaStyle notification, which raises its
+ * priority so background media-volume commands are honoured.
  */
 object SessionAudioMute {
 
@@ -85,10 +96,42 @@ object SessionAudioMute {
         else -> Mechanism.NONE
     }
 
+    // ---- B-136: restore verification and owed-volume bookkeeping (pure, unit-tested) ----
+
+    /**
+     * B-136 (a): a restore is VERIFIED by the stream-volume INDEX read-back only. The
+     * ADJUST_UNMUTE flag check is never used to claim a restore: when no mute flag was set
+     * (the INDEX mechanism) `isStreamMute` is false all along, so the old fallback "checked"
+     * a flag that proved nothing and claimed success while the volume stayed 0 (measured
+     * 2026-11-07, 15:06). The one legitimate flag check is the MUTE_FLAG mechanism's own
+     * state, where the flag was genuinely set at start and the index never moved - there
+     * the index read-back cannot distinguish anything, so the flag IS the state to verify.
+     */
+    fun restoreVerified(indexReadBack: Int, wanted: Int): Boolean = indexReadBack == wanted
+
+    /** B-136 (b): what the owed-volume state becomes after one restore attempt. */
+    fun owedAfterRestore(verified: Boolean, wanted: Int, owedBefore: Int): Int = when {
+        !verified -> wanted
+        // A verified restore of THIS session's value must not erase an OLDER owed volume:
+        // when the start could not clear the owed 60 in the background it saved the 0 it
+        // found, so this session's end "restores" 0 - the user's real 60 is still owed.
+        owedBefore >= 0 && owedBefore != wanted -> owedBefore
+        else -> -1
+    }
+
+    /**
+     * B-136 (c): the app coming to the foreground must finish an owed restore - but only
+     * when no session is live (a live session's silence is intentional, not owed).
+     */
+    fun needsForegroundRestore(owed: Int, holdingSessions: Int): Boolean =
+        owed >= 0 && holdingSessions == 0
+
     private const val STREAM = AudioManager.STREAM_MUSIC
     private val lock = Any()
     private var holds = 0
     private var savedVolume = -1
+    /** B-136 (b): a restore whose read-back did not verify; the foreground retry owes this. */
+    private var owedVolume = -1
     private var mechanism = Mechanism.NONE
     private var mediaSession: MediaSession? = null
 
@@ -107,7 +150,10 @@ object SessionAudioMute {
      * released on the last end. Null only when the platform refuses it.
      */
     private fun acquireMediaSession(ctx: Context): Boolean {
-        if (mediaSession?.isActive == true) return true
+        if (mediaSession?.isActive == true) {
+            postSessionNotification(ctx)
+            return true
+        }
         return try {
             val ms = MediaSession(ctx.applicationContext, "PopToPC session audio")
             ms.setPlaybackState(
@@ -117,6 +163,11 @@ object SessionAudioMute {
             )
             ms.isActive = true
             mediaSession = ms
+            // B-136 (d): the MediaStyle notification bound to this session is what raises
+            // its priority above "recent" - background media-volume commands are honoured
+            // for the session a notification is showing. The service's own foreground
+            // notification (47600) and the pairing prompt (47611) are untouched.
+            postSessionNotification(ctx)
             true
         } catch (t: Throwable) {
             android.util.Log.i("Phase4", "SESSIONAUDIO media session failed ${t.javaClass.simpleName}")
@@ -124,7 +175,52 @@ object SessionAudioMute {
         }
     }
 
-    private fun releaseMediaSession() {
+    /**
+     * B-136 (d): the ongoing MediaStyle notification on the service's existing low-importance
+     * session channel. Without POST_NOTIFICATIONS (the Android 13+ runtime prompt the user
+     * answered at first run) notify() is a no-op - the bare active MediaSession stays as the
+     * lower-priority fallback, never worse than the toggle OFF behaviour.
+     */
+    private fun postSessionNotification(ctx: Context) {
+        val ms = mediaSession ?: return
+        try {
+            val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    SESSION_CHANNEL,
+                    "PC session",
+                    NotificationManager.IMPORTANCE_LOW,
+                )
+            )
+            val n = androidx.core.app.NotificationCompat.Builder(ctx, SESSION_CHANNEL)
+                .setSmallIcon(dev.unifieddesktop.app.R.drawable.ic_stat_desktop)
+                .setContentTitle("PopToPC session")
+                .setContentText("Phone audio muted while the PC session is live")
+                .setOngoing(true)
+                .setStyle(
+                    androidx.media.app.NotificationCompat.MediaStyle()
+                        // MediaStyle binds the compat token (a wrapper of the platform one);
+                        // androidx.media 1.7.0 keeps this class in the v4 package.
+                        .setMediaSession(
+                            android.support.v4.media.session.MediaSessionCompat.Token
+                                .fromToken(ms.sessionToken)
+                        )
+                )
+                .build()
+            nm.notify(AUDIO_NOTIF_ID, n)
+        } catch (t: Throwable) {
+            android.util.Log.i("Phase4", "SESSIONAUDIO notification failed ${t.javaClass.simpleName}")
+        }
+    }
+
+    private fun cancelSessionNotification(ctx: Context) {
+        try {
+            ctx.getSystemService(NotificationManager::class.java)?.cancel(AUDIO_NOTIF_ID)
+        } catch (_: Throwable) {}
+    }
+
+    private fun releaseMediaSession(ctx: Context) {
+        cancelSessionNotification(ctx)
         try {
             mediaSession?.isActive = false
             mediaSession?.release()
@@ -137,6 +233,26 @@ object SessionAudioMute {
         val audio = ctx.getSystemService(AudioManager::class.java) ?: return
         val on = enabled(ctx)
         synchronized(lock) {
+            // B-136 (b): clear a previous session's owed restore FIRST, so the volume read
+            // below is the user's real volume and not the still-muted 0 (the accepted
+            // "next session saves the volume it finds" residual, closed where it can be).
+            if (needsForegroundRestore(owedVolume, holds)) {
+                val owed = owedVolume
+                val ok = try {
+                    audio.setStreamVolume(STREAM, owed, 0)
+                    restoreVerified(audio.getStreamVolume(STREAM), owed)
+                } catch (t: Throwable) {
+                    log("SESSIONAUDIO start owed restore threw ${t.javaClass.simpleName}")
+                    false
+                }
+                owedVolume = owedAfterRestore(ok, owed, owedVolume)
+                if (ok) {
+                    savedVolume = -1
+                    log("SESSIONAUDIO start owed restore applied volume=$owed")
+                } else {
+                    log("SESSIONAUDIO start owed restore did NOT verify (owed=$owed stays)")
+                }
+            }
             val current = try {
                 audio.getStreamVolume(STREAM)
             } catch (t: Throwable) {
@@ -170,7 +286,7 @@ object SessionAudioMute {
                 }
                 if (!worked) {
                     mechanism = Mechanism.NONE
-                    releaseMediaSession()
+                    releaseMediaSession(ctx)
                     log("SESSIONAUDIO start MUTE FAILED (background restriction?) - staying unmuted")
                     return
                 }
@@ -191,17 +307,24 @@ object SessionAudioMute {
             if (holds > 0) holds--
             val d = end(savedVolume >= 0, savedVolume, holds > 0)
             if (d.restore != null) {
+                val wanted = d.restore
                 var ok = false
                 when (mechanism) {
                     Mechanism.INDEX -> ok = try {
-                        audio.setStreamVolume(STREAM, d.restore, 0)
-                        audio.getStreamVolume(STREAM) == d.restore
+                        audio.setStreamVolume(STREAM, wanted, 0)
+                        // B-136 (a): verified by the INDEX read-back only. No ADJUST_UNMUTE
+                        // fallback here: the flag was never set, so `isStreamMute` proves
+                        // nothing - the old fallback claimed success while the volume
+                        // stayed 0 (B-136, measured 2026-11-07 15:06).
+                        restoreVerified(audio.getStreamVolume(STREAM), wanted)
                     } catch (t: Throwable) {
                         log("SESSIONAUDIO index restore threw ${t.javaClass.simpleName}")
                         false
                     }
                     Mechanism.MUTE_FLAG -> ok = try {
                         audio.adjustStreamVolume(STREAM, AudioManager.ADJUST_UNMUTE, 0)
+                        // The flag IS this mechanism's state (it was set at start; the index
+                        // never moved, so a read-back cannot distinguish anything).
                         !audio.isStreamMute(STREAM)
                     } catch (t: Throwable) {
                         log("SESSIONAUDIO unmute threw ${t.javaClass.simpleName}")
@@ -209,23 +332,52 @@ object SessionAudioMute {
                     }
                     Mechanism.NONE -> {}
                 }
-                if (!ok && mechanism == Mechanism.INDEX) {
-                    // The index restore can be ignored from the background (measured
-                    // 2026-11-07); unmute changes nothing the index path touched, so try it
-                    // as the belt to the index's braces.
-                    ok = try {
-                        audio.adjustStreamVolume(STREAM, AudioManager.ADJUST_UNMUTE, 0)
-                        !audio.isStreamMute(STREAM)
-                    } catch (_: Throwable) {
-                        false
-                    }
-                    if (ok) log("SESSIONAUDIO restore fell back to ADJUST_UNMUTE")
+                // B-136 (b): an unverified restore is RECORDED, never dropped - the app
+                // coming to the foreground retries it (restoreOwedOnForeground).
+                owedVolume = owedAfterRestore(ok, wanted, owedVolume)
+                if (!ok) {
+                    log("SESSIONAUDIO end RESTORE NOT VERIFIED mechanism=$mechanism (volume $wanted OWED)")
                 }
-                if (!ok) log("SESSIONAUDIO end RESTORE FAILED mechanism=$mechanism (volume stays ${d.restore} owed)")
-                savedVolume = -1
+                if (ok) savedVolume = -1
             }
-            if (holds == 0 && savedVolume < 0) releaseMediaSession()
-            log("SESSIONAUDIO end why=$why mechanism=$mechanism restored=${d.restore ?: "-"} holds=$holds")
+            if (holds == 0 && savedVolume < 0 && owedVolume < 0) releaseMediaSession(ctx)
+            log(
+                "SESSIONAUDIO end why=$why mechanism=$mechanism restored=${d.restore ?: "-"} " +
+                    "verified=${d.restore == null || owedVolume < 0} owed=$owedVolume holds=$holds",
+            )
+        }
+    }
+
+    /**
+     * B-136 (c): HomeActivity.onResume. A background restore can be silently ignored by
+     * Android (measured 2026-11-07); when the user opens the app the restriction does not
+     * apply, so a still-owed volume is restored here and verified by read-back. Kept owed
+     * when even this fails - the next session start and the next foreground retry again.
+     */
+    fun restoreOwedOnForeground(ctx: Context) {
+        val audio = ctx.getSystemService(AudioManager::class.java) ?: return
+        synchronized(lock) {
+            if (!needsForegroundRestore(owedVolume, holds)) return
+            val owed = owedVolume
+            val ok = try {
+                audio.setStreamVolume(STREAM, owed, 0)
+                restoreVerified(audio.getStreamVolume(STREAM), owed)
+            } catch (t: Throwable) {
+                android.util.Log.i(
+                    "Phase4",
+                    "SESSIONAUDIO foreground restore threw ${t.javaClass.simpleName}",
+                )
+                false
+            }
+            owedVolume = owedAfterRestore(ok, owed, owedVolume)
+            if (ok) {
+                savedVolume = -1
+                if (holds == 0) releaseMediaSession(ctx)
+            }
+            android.util.Log.i(
+                "Phase4",
+                "SESSIONAUDIO foreground restore owed=$owed verified=$ok (owed stays $owedVolume)",
+            )
         }
     }
 
@@ -235,4 +387,10 @@ object SessionAudioMute {
 
     private const val PREFS_FILE = "phone-home"
     private const val PREFS_KEY = "mute_while_session"
+
+    /** The service's own low-importance session channel; the audio notification rides it. */
+    private const val SESSION_CHANNEL = "ud_p4_session"
+
+    /** Distinct from the service foreground id (47600) and the pairing prompt (47611). */
+    private const val AUDIO_NOTIF_ID = 47612
 }

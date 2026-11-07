@@ -58,6 +58,22 @@ internal object Phase14BrowserPolicy {
 
     /** The profile is persistent exactly when the session is not private (unit-tested). */
     fun profilePersisted(privateMode: Boolean): Boolean = !privateMode
+
+    /**
+     * T14-3 item 4 (B-132 hardening): the FALLBACK WebView's desktop user-agent. A
+     * version-mismatched UA is itself a robot signal (the rendered engine capabilities do
+     * not match the claimed Chrome), so the claimed Chrome major version must match the
+     * device's actual WebView major version. When the version cannot be read (older API or
+     * a vendor build that returns null) the last measured-good pin (131) is used. Pure and
+     * unit-tested.
+     */
+    fun desktopChromeUa(webViewVersionName: String?, fallbackMajor: Int = 131): String {
+        val major = webViewVersionName
+            ?.trim()?.substringBefore('.')?.toIntOrNull()?.takeIf { it > 0 }
+            ?: fallbackMajor
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/$major.0.0.0 Safari/537.36"
+    }
 }
 
 /**

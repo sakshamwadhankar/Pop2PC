@@ -14,6 +14,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.widget.EditText
 import android.widget.FrameLayout
 
 /** A content view that wants raw mouse events instead of touch events (the Test window). */
@@ -256,6 +257,20 @@ class ShellWindowView(
         if (!target.isFocused && (target.isFocusable || target.isFocusableInTouchMode)) {
             target.requestFocus()
         }
+        // B-135: an EditText resolves a synthesized KeyEvent through the framework's
+        // KeyCharacterMap for the event's device, and on the test phone (ColorOS, Android 16)
+        // that map turns the UNSHIFTED KEYCODE_EQUALS into '+' - the typed URL
+        // .../cookies/set/poptopc=t142 landed as .../poptopc+t142. Our own
+        // Phase5Protocol.keyCodeToChar is correct and unit-tested, so for editable fields
+        // (address bar) a printable character takes the IME commit path instead of the raw
+        // event, exactly what a real keyboard would send. The WebView views keep their own
+        // dispatchKeyEvent routing (B-039/B-128).
+        if (target is EditText) {
+            val ch = Phase5Protocol.keyCodeToChar(keyCode, meta)
+            if (ShellKeyCommit.decide(down, keyCode, meta, ch)) {
+                if (ShellKeyCommit.commit(target, ch.toString())) return true
+            }
+        }
         return target.dispatchKeyEvent(ev)
     }
 
@@ -385,4 +400,34 @@ class TestWindowContent(context: Context) : TestDesktop(context), ShellMouseCont
     override fun mouseButton(button: Int, down: Boolean, x: Int, y: Int) = pointerButton(button, down, x, y)
     override fun mouseWheel(delta: Int, x: Int, y: Int) = wheel(delta, x, y)
     override fun contentText(): String = inputText()
+}
+
+/**
+ * B-135: the PC-key character route into the shell's editable fields. The pure decision and
+ * the commit helper live together so the three dispatch sites (window keyToContent, the
+ * modal field, the start-menu search) cannot drift apart.
+ *
+ * Why not a raw KeyEvent: an EditText resolves the keycode through the framework's
+ * KeyCharacterMap for the event's device, and on the test phone that map produced '+' for the
+ * UNSHIFTED '=' key. Our Phase5Protocol.keyCodeToChar is correct and unit-tested, so a
+ * printable character with no Ctrl/Alt is committed as text (what an IME does) instead of
+ * being re-resolved by the framework. Shift is intentionally allowed through: the mapping
+ * turns '=' + SHIFT into '+' and the raw UP that follows inserts nothing.
+ */
+internal object ShellKeyCommit {
+
+    /** True when this PC key should be committed as text into an editable field. */
+    fun decide(down: Boolean, keyCode: Int, meta: Int, ch: Char): Boolean =
+        down && ch != '\u0000' &&
+            (meta and (KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON)) == 0
+
+    /** Commit [text] into [target] through its own input connection (the IME route). */
+    fun commit(target: android.widget.EditText, text: String): Boolean {
+        val ic = target.onCreateInputConnection(android.view.inputmethod.EditorInfo())
+        val ok = ic?.commitText(text, 1) == true
+        if (ok) {
+            android.util.Log.i("Phase6", "B135 route=edittext-ime ch='$text'")
+        }
+        return ok
+    }
 }

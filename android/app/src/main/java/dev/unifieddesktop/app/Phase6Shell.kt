@@ -1057,6 +1057,12 @@ class ShellRoot(
                     now, now, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
                     keyCode, 0, meta, -1, scan, 0, android.view.InputDevice.SOURCE_KEYBOARD,
                 )
+                // B-135: same edittext-ime route as keyToContent (the framework's
+                // KeyCharacterMap typed '=' as '+' here too).
+                val ch = Phase5Protocol.keyCodeToChar(keyCode, meta)
+                if (ShellKeyCommit.decide(down, keyCode, meta, ch)) {
+                    if (ShellKeyCommit.commit(modalField, ch.toString())) return true
+                }
                 return modalField.dispatchKeyEvent(ev)
             }
             return true
