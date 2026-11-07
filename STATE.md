@@ -65,7 +65,7 @@ corrects it after review.
   manager-approved focus-gain clipboard re-read for B-103's phone-side half, retest the
   B-103 paste end-to-end, and close the D22 paired-proof via the debug-only thermal injection
   (B-127 decision) with a real-heat multi-window attempt alongside. Phase 14 follows Phase 13
-  and needs the product name (DECISIONS D12 - the owner picks it; the coder never invents one).
+  and needs the product name (**DECISIONS D12 — decided 2026-11-07: `PopToPC`**).
 - **Deferred post-launch plan (2026-11-04):** `PLAN.md` now records an optional Controller mode
   for controlling the PC from the phone, including app control, touchpad/keyboard, explicit
   clipboard transfer, media/system controls, capture and signature features. It is explicitly

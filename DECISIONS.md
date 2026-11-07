@@ -277,6 +277,9 @@ phase's gate passes.
   This is an emulator thermal-3 simulation, not a real phone thermal run (the phone was absent
   this session); the phone label remains open until the same run is repeated on hardware.
 
-### D12: No product name yet
-- **Decided:** 2026-10-13, by the owner. The owner chooses after checking domains. Never
-  invent a name; `unified-desktop` is a codename.
+### D12: Product name = **PopToPC**
+- **Decided:** 2026-10-13 (provisional: name later), **updated 2026-11-07 — the owner chose
+  the name `PopToPC`** after Phase 13's closure runs. `unified-desktop` remains the repo/
+  codename until the Phase 14 rename, which replaces user-facing strings, store listing and
+  branding (repo/folder rename is the owner's call at that point). Never invent a different
+  name; never start naming/rebranding work before Phase 14 opens.
