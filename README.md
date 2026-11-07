@@ -1,4 +1,4 @@
-# unified-desktop
+# PopToPC (repo: unified-desktop)
 
 **Your Android phone is the computer. Any PC is just the screen, keyboard and mouse.**
 

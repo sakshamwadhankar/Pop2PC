@@ -360,7 +360,7 @@ fn cmd_pair(rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let label = flag(rest, "--label", "unified-desktop phone");
+    let label = flag(rest, "--label", "PopToPC phone");
     let id = ident();
     let store = TrustedPhoneStore::open();
     crypto::ensure_ring_default();
@@ -394,7 +394,7 @@ fn cmd_bench(rest: &[String]) -> ExitCode {
     crypto::ensure_ring_default();
     // The bench must only run against an already-pinned phone; if this phone was never
     // paired from THIS run, do a quiet pair first (no code display on a pinned session).
-    match session::connect_and_pair(&addr, &id, &store, "unified-desktop phone") {
+    match session::connect_and_pair(&addr, &id, &store, "PopToPC phone") {
         Ok((mut s, description)) => {
             println!("link: {description}");
             // A stalled peer (or a dead adb-forward pipe) must fail cleanly, not hang.

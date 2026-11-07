@@ -6,4 +6,5 @@ local.properties
 *.aab
 *.keystore
 *.jks
+keystore.properties
 vendor/

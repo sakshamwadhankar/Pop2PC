@@ -559,7 +559,7 @@ fn create_window(shared: &Arc<Shared>) -> Result<HWND, String> {
     unsafe {
         let hinstance: HMODULE = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let class_name = HSTRING::from("udreceiver-view");
-        let title = HSTRING::from("unified-desktop view");
+        let title = HSTRING::from("PopToPC");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: HINSTANCE(hinstance.0),

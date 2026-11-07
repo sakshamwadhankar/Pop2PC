@@ -1,4 +1,4 @@
-T13-10: done 6 of 6, manager-reviewed 2026-11-07 (B-130/B-103/D22 verified and committed as c75f786; PHASE 13 COMPLETE). Now: Phase 14 — PopToPC rename + Play preparation (owner uploads to Play Console).
+T14-1: done 6 of 6. Updated 11:14. Now: manager review (owner backs up keystore + uploads AAB; NPP sha-mismatch bug filed in Temp\opencode\t14-1\RESULT.txt §3).
 
 # Night run: Phase 12 finish + Phase 13 polish
 

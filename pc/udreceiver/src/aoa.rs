@@ -42,9 +42,9 @@ pub const REQ_START: u8 = 53;
 
 /// SEND_STRING strings; 0/1 must match res/xml/usb_accessory_filter.xml.
 pub const STRINGS: [(u16, &str); 3] = [
-    (0, "unified-desktop"),                 // manufacturer
-    (1, "desktop"),                         // model
-    (2, "unified-desktop phone as the PC"), // description
+    (0, "PopToPC"),                 // manufacturer
+    (1, "desktop"),                 // model
+    (2, "PopToPC phone as the PC"), // description
 ];
 
 pub fn setup_packet(
@@ -422,7 +422,7 @@ mod tests {
     fn strings_are_the_filter_identity() {
         let reqs = send_string_requests();
         assert_eq!(reqs[0].0, 0);
-        assert_eq!(reqs[0].1, b"unified-desktop\0");
+        assert_eq!(reqs[0].1, b"PopToPC\0");
         assert_eq!(reqs[1].0, 1);
         assert_eq!(reqs[1].1, b"desktop\0");
         assert!(reqs.iter().all(|(_, b)| b.last() == Some(&0)));

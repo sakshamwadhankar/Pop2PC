@@ -3,5 +3,5 @@
      strings). Android only offers "Open with [our app]?" for accessories matching
      this filter; no developer mode is involved (USER_WORKFLOW 2.3). -->
 <resources>
-    <usb-accessory manufacturer="unified-desktop" model="desktop" />
+    <usb-accessory manufacturer="PopToPC" model="desktop" />
 </resources>

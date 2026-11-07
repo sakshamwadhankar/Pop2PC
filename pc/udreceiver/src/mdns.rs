@@ -302,7 +302,7 @@ mod tests {
     /// Synthetic mDNS response: PTR(SERVICE) -> instance, SRV(instance) -> host:47600,
     /// A(host) -> 192.168.1.42, with record names encoded as compression pointers.
     fn pkt_with(service: &str) -> Vec<u8> {
-        let instance = format!("unified-desktop.{service}");
+        let instance = format!("PopToPC.{service}");
         let host = "android.local";
         let mut rdata_ptr = Vec::new();
         push_name(&mut rdata_ptr, &instance);
@@ -344,7 +344,7 @@ mod tests {
         assert!(parse_answers(&pkt, &mut recs).is_some());
         let found = resolve(&recs);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].instance, "unified-desktop._udlink._tcp.local");
+        assert_eq!(found[0].instance, "poptopc._udlink._tcp.local");
         assert_eq!(found[0].host, "android.local");
         assert_eq!(found[0].ip, "192.168.1.42");
         assert_eq!(found[0].port, 47600);
@@ -412,7 +412,7 @@ mod tests {
         );
         t.join().unwrap();
         assert_eq!(found.len(), 1, "found={found:?}");
-        assert_eq!(found[0].instance, "unified-desktop._udlink._tcp.local");
+        assert_eq!(found[0].instance, "poptopc._udlink._tcp.local");
         assert_eq!(found[0].ip, "192.168.1.42");
         assert_eq!(found[0].port, 47600);
     }

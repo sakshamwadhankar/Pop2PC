@@ -443,7 +443,7 @@ fn create_window() -> Result<HWND, String> {
             .map_err(|e| format!("GetModuleHandleW: {e}"))?
             .into();
         let class = HSTRING::from("udreceiver-gui");
-        let title = HSTRING::from("Phone desktop");
+        let title = HSTRING::from("PopToPC");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: HINSTANCE(hinstance.0),
@@ -784,7 +784,7 @@ fn paint(hwnd: HWND) {
 
 fn draw_header(hdc: HDC, s: f32) {
     draw_logo(hdc, 28, 24, 28, s);
-    draw_text(hdc, "Phone desktop", 68, 28, 300, 26, 16.0, TEXT, true, DT_LEFT | DT_SINGLELINE, s);
+    draw_text(hdc, "PopToPC", 68, 28, 300, 26, 16.0, TEXT, true, DT_LEFT | DT_SINGLELINE, s);
     fill_rect(hdc, 28, 72, 424, 1, BORDER, s);
 }
 

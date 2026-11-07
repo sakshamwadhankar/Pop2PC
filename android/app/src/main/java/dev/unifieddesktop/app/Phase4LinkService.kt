@@ -55,7 +55,9 @@ class Phase4LinkService : Service() {
         const val TAG = "Phase4"
         const val PORT = 47600
         const val NSD_TYPE = "_udlink._tcp."
-        const val NSD_NAME = "unified-desktop"
+        // D12: the service instance name the PC's discovery screen shows; the service
+        // TYPE stays `_udlink._tcp` (protocol-level, both sides ship together).
+        const val NSD_NAME = "PopToPC"
 
         /**
          * B-127 decision (manager 2026-11-07): a DEBUG-ONLY thermal injection so the D22

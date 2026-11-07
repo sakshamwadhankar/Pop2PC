@@ -9,7 +9,7 @@ import android.hardware.usb.UsbManager
  * Phase-4 AOA accessory-side support (ARCHITECTURE Q5). The PC is the USB host that
  * sends control requests 51/52/53 to switch the phone into accessory mode; after the
  * re-enumeration the phone sees a USB accessory (VID 0x18D1, PID 0x2D00) which matches
- * res/xml/usb_accessory_filter.xml (manufacturer "unified-desktop", model "desktop").
+ * res/xml/usb_accessory_filter.xml (manufacturer "PopToPC", model "desktop").
  *
  * The streams of the opened accessory feed the SAME session engine as the TCP link,
  * wrapped in TLS. Work plan for item 8: dump the on-device accessory flow here.
