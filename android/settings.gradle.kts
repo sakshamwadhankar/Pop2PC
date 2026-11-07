@@ -1,5 +1,5 @@
 pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral(); maven("https://jitpack.io") { content { includeGroup("com.github.tiann") } } } }
+dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral(); maven("https://maven.mozilla.org/maven2") { content { includeGroup("org.mozilla.geckoview") } }; maven("https://jitpack.io") { content { includeGroup("com.github.tiann") } } } }
 rootProject.name = "unified-desktop"
 include(":app")
 include(":engine", ":black-reflection", ":compiler")

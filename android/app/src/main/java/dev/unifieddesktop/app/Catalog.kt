@@ -9,6 +9,19 @@ import org.json.JSONObject
  *
  * [rating] is how well this version runs on the phone (the only thing that decides whether
  * it is offered), never whether an installer exists. [fetch] says where the bytes come from.
+ *
+ * Catalog refresh policy — upstream re-released under the same tag (B-133, manager-approved
+ * 2026-11-07): a publisher may replace a release asset WITHOUT changing its tag or version,
+ * so the bytes at a pinned URL can change under an unchanged manifest. Notepad++ 8.9.8.1 did
+ * exactly that (twice: the MSI briefly served different bytes, then the original bytes came
+ * back). On a sha mismatch the check itself is NEVER downgraded or skipped; instead:
+ * (1) fetch the CURRENT bytes at the pinned URL and compute sha256; (2) if they match a
+ * winget manifest commit whose InstallerSha256 equals those bytes, re-pin [fetch] to that
+ * commit and [sha256] to it; (3) if the upstream bytes are unstable, move the entry to a
+ * distribution whose hash is stable (e.g. the portable zip), verifying the new pin the same
+ * way; (4) log the change (old sha -> new sha, date, evidence path) in the entry's note and
+ * the task report. A mismatch is a refusal, never a silent accept: unverified bytes must
+ * never reach Wine (B-081 policy).
  */
 data class CatalogVersion(
     val version: String,

@@ -59,6 +59,7 @@ class HomeActivity : Activity() {
     private lateinit var homeSetup: SetupViews
     private lateinit var settingsSetup: SetupViews
     private lateinit var soundValue: TextView
+    private lateinit var muteValue: TextView
     private lateinit var trustedBox: LinearLayout
     private var trustedSig = ""
 
@@ -582,6 +583,28 @@ class HomeActivity : Activity() {
         soundCard.addView(soundRow)
         page.addView(soundCard, cardParams())
 
+        // B-131: while a PC session is live the phone's own media volume is muted so the
+        // sound plays only on the PC; the captured stream is unaffected (pre-speaker tap).
+        val muteCard = card()
+        val muteRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            setOnClickListener { toggleMute() }
+        }
+        val muteCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        muteCol.addView(label("Mute phone while PC session is active", 16f, ui.text, medium = true))
+        muteCol.addView(label("The PC hears the sound; this phone stays silent.", 12f, ui.dim))
+        muteRow.addView(muteCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        muteValue = label("On", 13f, ui.secondary, medium = true).apply {
+            gravity = Gravity.CENTER
+            background = ui.rounded(ui.raised, ui.dpf(14f))
+            setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(6))
+        }
+        muteRow.addView(muteValue)
+        muteCard.addView(muteRow)
+        page.addView(muteCard, cardParams())
+
         page.addView(section("FIRST-RUN SETUP"))
         settingsSetup = buildSetupCard(compact = false)
         page.addView(settingsSetup.card, cardParams())
@@ -652,6 +675,20 @@ class HomeActivity : Activity() {
         } else {
             requestSound()
         }
+    }
+
+    /** B-131: the PC-only-audio toggle. Takes effect on the next session start; a session
+     *  end always restores the volume it muted, whatever the toggle says. */
+    private fun refreshMute() {
+        val on = SessionAudioMute.enabled(this)
+        muteValue.text = if (on) "On" else "Off"
+        muteValue.setTextColor(if (on) ui.success else ui.secondary)
+        muteValue.background = ui.rounded(if (on) ui.successSoft else ui.raised, ui.dpf(14f))
+    }
+
+    private fun toggleMute() {
+        SessionAudioMute.setEnabled(this, !SessionAudioMute.enabled(this))
+        refreshMute()
     }
 
     private fun requestSound() {
@@ -732,6 +769,7 @@ class HomeActivity : Activity() {
         refreshSetup(settingsSetup)
         refreshQuality()
         refreshSound()
+        refreshMute()
         refreshTrusted(force = true)
         (content.parent as? ScrollView)?.scrollTo(0, 0)
     }

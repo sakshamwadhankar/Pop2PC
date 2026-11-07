@@ -586,6 +586,73 @@ object Phase2Data {
         writeLog(ctx)
     }
 
+    /**
+     * The files the Wine/Xvfb runtime needs before any boot can succeed: the active pin's
+     * loader and wineserver, msiexec (the silent-installer path), and the rootfs Xvfb.
+     * Pure and unit-tested ([runtimeMissing]); the disk check below is its only caller
+     * besides the tests.
+     */
+    fun runtimeRequiredPaths(pinDir: String, loaderRel: String): List<String> = listOf(
+        "wine/$pinDir/$loaderRel",
+        "wine/$pinDir/bin/wineserver",
+        "wine/$pinDir/lib/wine/x86_64-windows/msiexec.exe",
+        "rootfs/usr/bin/Xvfb",
+    )
+
+    /** Pure decision: which of [existing] flags (parallel to [runtimeRequiredPaths]) miss. */
+    fun runtimeMissing(existing: List<Boolean>): List<Int> =
+        existing.withIndex().filter { !it.value }.map { it.index }
+
+    /**
+     * Product-path runtime bootstrap (T14-2): a real user's first Windows-app install starts
+     * from an EMPTY app data dir - the fetchers above were reachable only from the debug
+     * harness, so the App Center install downloaded the MSI fine and then died in boot with
+     * "wine patch failed" (found 2026-11-07: installer exit -1 in ~100 ms). This checks the
+     * pinned tree and stages what is missing, idempotently and sha-verified like every other
+     * fetch. Called from [Phase2Wine.boot], so installers, app opens and the warm-up all
+     * share one bootstrap. Returns false (and logs) when the fetch did not produce a usable
+     * tree; the caller aborts the boot.
+     *
+     * The big fetches retry ([RETRIES] attempts): the phone's route to GitHub measured
+     * 36 KB/s with mid-download resets on 2026-11-07 (a 102 MB wine tarball died after
+     * 32 min), so one attempt per install click is not enough for a real user.
+     */
+    @Synchronized
+    fun ensureWineRuntime(ctx: Context): Boolean {
+        val pin = winePin(ctx)
+        val root = rootDir(ctx)
+        val required = runtimeRequiredPaths(pin.dir, pin.loaderRel)
+        val missing = runtimeMissing(required.map { File(root, it).isFile })
+        if (missing.isEmpty()) {
+            say("RUNTIME ok pin=${pin.id} (tree complete, nothing fetched)")
+            return true
+        }
+        val t0 = System.currentTimeMillis()
+        say("RUNTIME_BOOTSTRAP pin=${pin.id} missing=${missing.joinToString(",") { required[it] }}")
+        var last: Throwable? = null
+        for (attempt in 1..RETRIES) {
+            try {
+                fetchRuntime(ctx)
+                fetchBundle(ctx)
+                fetchWine(ctx)
+                val ok = runtimeRequiredPaths(pin.dir, pin.loaderRel).all { File(root, it).isFile }
+                say("RUNTIME_BOOTSTRAP ok=$ok attempt=$attempt ms=${System.currentTimeMillis() - t0}")
+                return ok
+            } catch (t: Throwable) {
+                last = t
+                say(
+                    "RUNTIME_BOOTSTRAP attempt=$attempt failed ${t.javaClass.simpleName}: " +
+                        "${t.message?.take(80)}",
+                )
+                writeLog(ctx)
+            }
+        }
+        say("RUNTIME_BOOTSTRAP gave up after $RETRIES attempts (${last?.javaClass?.simpleName})")
+        return false
+    }
+
+    private const val RETRIES = 3
+
     fun fetchBundle(ctx: Context) {
         val t0 = System.currentTimeMillis()
         val gztar = download(ctx, BUNDLE_URL, BUNDLE_SHA256, "bundle.tar.gz")

@@ -829,6 +829,14 @@ object Phase2Wine {
     }
 
     fun boot(ctx: Context, winedebug: String? = null) {
+        // T14-2: a real user's first Windows app starts from empty app data. Stage the
+        // Wine/Xvfb runtime (idempotent, sha-checked) before anything touches the tree;
+        // every user path (installers, catalog opens, warm-up) funnels through boot.
+        if (!Phase2Data.ensureWineRuntime(ctx)) {
+            say("WINE_BOOT_ABORT runtime fetch failed")
+            writeLog(ctx)
+            return
+        }
         reapLeftoverProcesses(ctx, "boot")   // B-029: one orphan set per boot no more
         // The reaper kills the managed Xvfb too; forget and reap it before ensureXvfb, or a
         // socket that is closing can still look alive and skip the restart (B-084).

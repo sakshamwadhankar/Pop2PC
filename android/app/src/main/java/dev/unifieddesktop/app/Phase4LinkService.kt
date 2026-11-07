@@ -720,6 +720,10 @@ class Phase4LinkService : Service() {
         }
         // B-047: a paired session gets NO video until the PC asks with "video-on".
         p5.start(false)
+        // B-131: from this accepted session on, the phone's own media volume is muted so a
+        // PC session is PC-only audio; the capture taps pre-speaker audio, so the PC stream
+        // is unaffected. The toggle lives in Settings (default ON).
+        SessionAudioMute.startSession(this) { line -> say(line) }
         // B-116(a): the PC must not treat a pin alone as proof that this phone still trusts
         // it. Say "trusted" on a pinned session, or offer the code when the phone has
         // forgotten the PC. The PC shows the code screen and waits for Yes before it locks.
@@ -902,6 +906,12 @@ class Phase4LinkService : Service() {
             if (!stopping) p5.shell()?.toast(Toasts.LINK_LOST)
             p5.stop(if (stopping) "service stop" else "link lost")
             Phase11Audio.unbindSink(if (stopping) "service stop" else "session end")
+            // B-131: every session-end path (clean exit, link death, session exception)
+            // restores the pre-session media volume. Service stop also lands here (the
+            // stop path joins the pump), so Stop link un-mutes too.
+            SessionAudioMute.endSession(this, if (stopping) "service stop" else "session end") { line ->
+                say(line)
+            }
             liveSessions.remove(live)
             synchronized(sessionGuard) {
                 if (currentLive === live) {

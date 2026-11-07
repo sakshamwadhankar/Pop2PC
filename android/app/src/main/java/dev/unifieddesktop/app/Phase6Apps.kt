@@ -24,6 +24,11 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import org.mozilla.geckoview.GeckoResult
+import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.WebResponse
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.HttpURLConnection
@@ -572,6 +577,270 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         }
     }
 
+    // ---- B-132: the engine ---------------------------------------------------
+    //
+    // The user-facing Browser runs GeckoView (real Firefox, persistent profile). VS Code
+    // stays on the WebView (code-server's EditContext input route and cookies are proven
+    // there), and the WebView is the automatic fallback whenever GeckoView cannot init.
+    @Volatile private var geckoSession: GeckoSession? = null
+    private var geckoCanBack = false
+    private var geckoCanForward = false
+    private var geckoTitle = ""
+
+    val geckoView: GeckoView? = tryGecko()
+
+    @Volatile private var geckoActive = geckoView != null
+    private val usingGecko: Boolean get() = geckoActive
+
+    private fun tryGecko(): GeckoView? {
+        if (codeServer) return null
+        val decision = Phase14BrowserPolicy.engine(
+            Phase14BrowserPolicy.isArm64(java.util.Arrays.asList(*android.os.Build.SUPPORTED_ABIS)),
+            GeckoEngine.initFailed,
+        )
+        if (!decision.useGecko) {
+            android.util.Log.i("Phase6", "B132 engine=webview reason=${decision.reason}")
+            return null
+        }
+        return try {
+            val ctx = context.applicationContext ?: context
+            val rt = GeckoEngine.runtime(ctx)
+                ?: throw IllegalStateException("GeckoRuntime unavailable")
+            val view = GeckoKeyView(context)
+            view.setBackgroundColor(Theme.SURFACE)
+            val session = GeckoSession(
+                GeckoSessionSettings.Builder()
+                    // Persistent profile: cookies and logins survive restarts (B-132).
+                    .usePrivateMode(false)
+                    // B-082 for the Firefox engine: the real desktop UA, not a WebView that
+                    // claims to be Chrome (the exact signature Google's walls look for).
+                    .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
+                    .build()
+            )
+            wireGeckoDelegates(session)
+            session.open(rt)
+            view.setSession(session)
+            geckoSession = session
+            android.util.Log.i("Phase6", "B132 engine=gecko 159.0.20261102144711 persistent=true")
+            view
+        } catch (t: Throwable) {
+            GeckoEngine.initFailed = true
+            android.util.Log.i(
+                "Phase6",
+                "B132 gecko init FAILED -> webview fallback ${t.javaClass.simpleName}: " +
+                    "${t.message?.take(80)}",
+            )
+            null
+        }
+    }
+
+    /**
+     * The B-132 runtime fallback: GeckoView's child processes died (ContentDelegate.onCrash).
+     * Swap the window's content to the WebView engine, close the gecko session, mark the
+     * engine failed for the whole process, and reload where the user was. Runs on the UI
+     * thread via post.
+     */
+    private fun swapToWebViewFallback(why: String) {
+        if (!geckoActive) return
+        geckoActive = false
+        GeckoEngine.initFailed = true
+        post {
+            val g = geckoView ?: return@post
+            val index = indexOfChild(g)
+            val url = tabs[activeTab].url
+            removeView(g)
+            try { geckoSession?.close() } catch (_: Throwable) {}
+            geckoSession = null
+            addView(web, index, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+            web.setBackgroundColor(Theme.SURFACE)
+            if (!codeServer) {
+                // status is already attached from init; only the engine view was swapped.
+                if (url.isNotBlank()) {
+                    pendingTab = activeTab
+                    pendingStartPage = false
+                    web.loadUrl(url)
+                } else {
+                    loadStartPage()
+                }
+            }
+            android.util.Log.i("Phase6", "B132 engine FALLBACK webview why=$why url=$url")
+            status.text = "browser engine fallback (see log)"
+        }
+    }
+
+    /** Gecko delegates -> the tab model / address bar / status line / downloads. */
+    private fun wireGeckoDelegates(session: GeckoSession) {
+        session.setProgressDelegate(object : GeckoSession.ProgressDelegate {
+            override fun onPageStart(s: GeckoSession, url: String) {
+                if (pendingTab != activeTab) return
+                status.text = "loading $url"
+            }
+
+            override fun onPageStop(s: GeckoSession, success: Boolean) {
+                geckoLoadWaitPending = false
+                if (pendingTab != activeTab) return
+                status.text = if (success) {
+                    val u = tabs[activeTab].url
+                    if (u.isBlank() || u.startsWith("data:")) "" else "loaded $u"
+                } else "load failed"
+            }
+        })
+        session.setNavigationDelegate(object : GeckoSession.NavigationDelegate {
+            override fun onLocationChange(
+                s: GeckoSession,
+                url: String?,
+                permissions: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
+                hasUserGesture: Boolean,
+            ) {
+                val u = url ?: return
+                if (pendingTab != activeTab) return
+                // data: URIs are our in-page start pages; never show them as the tab URL.
+                if (u.startsWith("data:")) return
+                val tab = tabs[activeTab]
+                tab.url = u
+                tab.title = (geckoTitle.ifBlank { android.net.Uri.parse(u).host ?: u }).take(18)
+                address.setText(u)
+                refreshTabs()
+            }
+
+            override fun onCanGoBack(s: GeckoSession, canGoBack: Boolean) {
+                geckoCanBack = canGoBack
+            }
+
+            override fun onCanGoForward(s: GeckoSession, canGoForward: Boolean) {
+                geckoCanForward = canGoForward
+            }
+
+            override fun onNewSession(s: GeckoSession, uri: String): GeckoResult<GeckoSession>? {
+                // A desktop browser opens new tabs in the SAME window's engine; target=_blank
+                // replaces the current page rather than dying silently.
+                return null
+            }
+        })
+        session.setContentDelegate(object : GeckoSession.ContentDelegate {
+            override fun onTitleChange(s: GeckoSession, title: String?) {
+                geckoTitle = title.orEmpty()
+                if (pendingTab != activeTab) return
+                val tab = tabs[activeTab]
+                if (geckoTitle.isNotBlank()) {
+                    tab.title = geckoTitle.take(18)
+                    refreshTabs()
+                }
+            }
+
+            override fun onCrash(s: GeckoSession) {
+                android.util.Log.i("Phase6", "B132 gecko session CRASHED")
+                if (Phase14BrowserPolicy.fallbackAfterCrash(1)) swapToWebViewFallback("content crash")
+            }
+
+            override fun onKill(s: GeckoSession) {
+                android.util.Log.i("Phase6", "B132 gecko session KILLED (OOM)")
+                if (Phase14BrowserPolicy.fallbackAfterCrash(1)) swapToWebViewFallback("content killed")
+            }
+
+            override fun onFirstContentfulPaint(s: GeckoSession) {
+                // The engine really painted: the load-timeout fallback is not needed.
+                geckoEverPainted = true
+                geckoLoadWaitPending = false
+            }
+
+            override fun onExternalResponse(s: GeckoSession, response: WebResponse) {
+                // The GeckoView download path (the WebView path used setDownloadListener).
+                status.text = "downloading..."
+                Thread({
+                    val name = BrowserDownloads.fileName(
+                        response.headers["Content-Disposition"], response.uri
+                    )
+                    val dir = Phase11Files.desktopDir(context)
+                    dir.mkdirs()
+                    val out = java.io.File(dir, "Downloads/$name")
+                    out.parentFile?.mkdirs()
+                    val bytes = try {
+                        response.body?.use { it.readBytes() } ?: ByteArray(0)
+                    } catch (t: Throwable) {
+                        post { status.text = "download failed (${t.javaClass.simpleName})" }
+                        return@Thread
+                    }
+                    out.writeBytes(bytes)
+                    val msg = "saved $name (${bytes.size} B)"
+                    post { status.text = msg }
+                    android.util.Log.i("Phase6", "BROWSER gecko download $msg")
+                }, "ud-download-gecko").start()
+            }
+        })
+    }
+
+    // Engine-agnostic helpers: every navigation/UI call below goes through these so the
+    // WebView fallback and the Gecko engine cannot drift apart.
+
+    private var geckoEverPainted = false
+    private var geckoLoadWaitPending = false
+    private val geckoLoadTimeoutMs = 25_000L
+    private val geckoHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private fun engineLoad(url: String) {
+        val s = geckoSession
+        if (s != null) {
+            armGeckoLoadTimeout()
+            s.loadUri(url)
+        } else web.loadUrl(url)
+    }
+
+    /** B-132 second trigger: a gecko load that never paints (children died at bind). */
+    private fun armGeckoLoadTimeout() {
+        if (!geckoActive || geckoLoadWaitPending) return
+        geckoLoadWaitPending = true
+        geckoHandler.postDelayed({
+            geckoLoadWaitPending = false
+            if (geckoActive && !geckoEverPainted &&
+                Phase14BrowserPolicy.fallbackAfterLoadTimeout(
+                    painted = geckoEverPainted, waitedMs = geckoLoadTimeoutMs,
+                    timeoutMs = geckoLoadTimeoutMs,
+                )
+            ) {
+                swapToWebViewFallback("load timeout ${geckoLoadTimeoutMs}ms, nothing painted")
+            }
+        }, geckoLoadTimeoutMs)
+    }
+
+    private fun engineLoadHtml(base: String, html: String, mime: String) {
+        val s = geckoSession
+        if (s == null) {
+            web.loadDataWithBaseURL(base, html, mime, "utf-8", null)
+            return
+        }
+        // GeckoSession has no loadDataWithBaseURL; data: URIs are the documented route.
+        // Our start pages and ud: pages use absolute URLs/links only, so a null base is fine.
+        val b64 = android.util.Base64.encodeToString(html.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        armGeckoLoadTimeout()
+        s.loadUri("data:$mime;base64,$b64")
+    }
+
+    private fun engineReload() {
+        val s = geckoSession
+        if (s != null) s.reload() else web.reload()
+    }
+
+    private fun engineCanGoBack(): Boolean {
+        val s = geckoSession ?: return web.canGoBack()
+        return geckoCanBack
+    }
+
+    private fun engineGoBack() {
+        val s = geckoSession
+        if (s != null) s.goBack() else web.goBack()
+    }
+
+    private fun engineCanGoForward(): Boolean {
+        val s = geckoSession ?: return web.canGoForward()
+        return geckoCanForward
+    }
+
+    private fun engineGoForward() {
+        val s = geckoSession
+        if (s != null) s.goForward() else web.goForward()
+    }
+
     /**
      * Phase 11 D-e: document-start shim injection without androidx.webkit (not in the offline
      * Gradle cache, and dl.google.com is unreachable). The main-frame HTML is fetched here and
@@ -696,7 +965,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         history.add("ud:$page"); pos = history.size - 1
         address.setText("ud:$page")
         status.text = "loading ud:$page"
-        web.loadDataWithBaseURL("https://ud.local/", html, "text/html; charset=utf-8", "UTF-8", null)
+        engineLoadHtml("https://ud.local/", html, "text/html; charset=utf-8")
         android.util.Log.i("Phase6", "BROWSER ud:$page")
         return "opened ud:$page"
     }
@@ -716,7 +985,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
                 setPadding(6, 4, 6, 4)
                 addView(DeskIconButton(context, DeskIcon.LEFT, "Back") { back() }, LayoutParams(30, 28))
                 addView(DeskIconButton(context, DeskIcon.RIGHT, "Forward") { forward() }, LayoutParams(30, 28))
-                addView(DeskIconButton(context, DeskIcon.RELOAD, "Reload") { web.reload() }, LayoutParams(30, 28))
+                addView(DeskIconButton(context, DeskIcon.RELOAD, "Reload") { engineReload() }, LayoutParams(30, 28))
                 addView(address, LayoutParams(0, 28, 1f).apply { marginStart = 4 })
                 addView(shellButton(context, "Go", primary = true) { go() }, LayoutParams(56, 28).apply {
                     marginStart = 6
@@ -725,8 +994,10 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
             addView(bar, LayoutParams(LayoutParams.MATCH_PARENT, 36))
             addView(shellDivider(context), LayoutParams(LayoutParams.MATCH_PARENT, 1))
         }
-        addView(web, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        addView(if (usingGecko) geckoView!! else web, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         // Phase 11 D-e: document-start shim pages reach us through this on every page.
+        // Gecko has no WebView JavascriptInterface; the shim stays on the WebView engine
+        // (its camtest page still renders, the bridge just has no counterpart there).
         web.addJavascriptInterface(udBridge, "UdBridge")
         if (!codeServer) {
             // A dark Google-style start page: a fresh Browser used to be a full white window.
@@ -833,7 +1104,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         } else {
             pendingTab = activeTab
             pendingStartPage = false
-            web.loadUrl(tab.url)
+            engineLoad(tab.url)
         }
     }
 
@@ -852,7 +1123,8 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         address.setText("")
         status.text = ""
         web.setBackgroundColor(Theme.SURFACE)
-        web.loadDataWithBaseURL(
+        geckoView?.setBackgroundColor(Theme.SURFACE)
+        engineLoadHtml(
             "https://www.google.com/",
             "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" +
                 "<style>html,body{margin:0;height:100%;background:#0b0f17;color:#e8eef7;" +
@@ -869,8 +1141,6 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
                 "<button type='submit'>Search</button></form>" +
                 "<p>Type an address in the bar above, or search Google here.</p></div></body></html>",
             "text/html",
-            "utf-8",
-            null,
         )
         refreshTabs()
     }
@@ -882,7 +1152,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
             KeyEvent.META_CTRL_RIGHT_ON)) != 0
         val shift = (meta and KeyEvent.META_SHIFT_ON) != 0
         when {
-            keyCode == KeyEvent.KEYCODE_F5 -> web.reload()
+            keyCode == KeyEvent.KEYCODE_F5 -> engineReload()
             ctrl && keyCode == KeyEvent.KEYCODE_T -> newTab()
             ctrl && keyCode == KeyEvent.KEYCODE_W -> closeTab()
             ctrl && keyCode == KeyEvent.KEYCODE_L -> {
@@ -900,6 +1170,11 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
     }
 
     private fun zoom(delta: Int) {
+        if (usingGecko) {
+            // GeckoView exposes no textZoom; the page's own zoom is the touch path's job.
+            status.text = "zoom: not on this engine"
+            return
+        }
         val settings = web.settings
         settings.textZoom = if (delta == 0) 100 else (settings.textZoom + delta).coerceIn(50, 200)
         status.text = "zoom ${settings.textZoom}%"
@@ -952,7 +1227,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         tabs[activeTab].title = (android.net.Uri.parse(url).host ?: url).take(18)
         address.setText(url)
         refreshTabs()
-        web.loadUrl(url)
+        engineLoad(url)
         android.util.Log.i("Phase6", "BROWSER go $url")
     }
 
@@ -1012,8 +1287,8 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
             refreshTabs()
             pendingTab = activeTab
             pendingStartPage = false
-            web.loadUrl(history[pos])
-        } else if (web.canGoBack()) web.goBack()
+            engineLoad(history[pos])
+        } else if (engineCanGoBack()) engineGoBack()
     }
 
     fun forward() {
@@ -1024,8 +1299,8 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
             refreshTabs()
             pendingTab = activeTab
             pendingStartPage = false
-            web.loadUrl(history[pos])
-        } else if (web.canGoForward()) web.goForward()
+            engineLoad(history[pos])
+        } else if (engineCanGoForward()) engineGoForward()
     }
 
     /**
@@ -1035,7 +1310,8 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
      * asynchronously into the log, so the route that works is a fact, not a guess.
      */
     fun probeKeyboard(payload: String): String {
-        web.requestFocus()
+        val target = geckoView ?: web
+        target.requestFocus()
         var handled = 0
         for (ch in payload) {
             val code = charToKeyCode(ch)
@@ -1046,13 +1322,19 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
                 android.view.KeyEvent.ACTION_DOWN, code, 0, meta, -1, 0, 0,
                 android.view.InputDevice.SOURCE_KEYBOARD
             )
-            if (web.dispatchKeyEvent(ev)) handled++
+            if (target.dispatchKeyEvent(ev)) handled++
             val up = android.view.KeyEvent(
                 android.os.SystemClock.uptimeMillis(), android.os.SystemClock.uptimeMillis(),
                 android.view.KeyEvent.ACTION_UP, code, 0, meta, -1, 0, 0,
                 android.view.InputDevice.SOURCE_KEYBOARD
             )
-            web.dispatchKeyEvent(up)
+            target.dispatchKeyEvent(up)
+        }
+        if (usingGecko) {
+            // GeckoSession has no evaluateJavascript; the DOM keydown counter is a
+            // WebView-only probe. The engine route logs each committed char (B132 route=ime).
+            android.util.Log.i("Phase6", "B039 probe gecko payload=\"$payload\" handled=$handled")
+            return "dispatch=$handled engine=gecko"
         }
         val ic = android.view.inputmethod.BaseInputConnection(web, true)
         ic.commitText(payload, 1)
@@ -1070,6 +1352,7 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
 
     /** Keydown events the page recorded (the DOM probe), fetched asynchronously. */
     fun keyCount(): Int {
+        if (usingGecko) return cachedKeys // no DOM probe on Gecko; the harness knows the limit
         web.evaluateJavascript("(window.__udKeys||[]).length") { v ->
             v?.trim()?.trim('"')?.toIntOrNull()?.let { cachedKeys = it }
         }
@@ -1078,6 +1361,10 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
 
     /** Last recorded keydown keys, for evidence. */
     fun keysSeen(cb: (String) -> Unit) {
+        if (usingGecko) {
+            cb("gecko: no DOM probe")
+            return
+        }
         web.evaluateJavascript("JSON.stringify(window.__udKeys||[])") { v -> cb(v ?: "?") }
     }
 

@@ -1,4 +1,4 @@
-T14-1: done 6 of 6. Updated 11:14. Now: manager review (owner backs up keystore + uploads AAB; NPP sha-mismatch bug filed in Temp\opencode\t14-1\RESULT.txt §3).
+T14-2: done 4 of 5. Updated 13:46. Now: wine-tarball fetch attempt 1 on the phone (ETA ~14:15 at ~30 KB/s); B-131 fully proven live (160->0->160 from background, PC receives YouTube audio while phone muted); B-132 fallback proven live (gecko load-timeout -> WebView); cargo 103/0 + clippy 0 done.
 
 # Night run: Phase 12 finish + Phase 13 polish
 

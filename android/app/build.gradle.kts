@@ -10,7 +10,12 @@ val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
 
-android { namespace = "dev.unifieddesktop.app"; compileSdk = 36
+android { namespace = "dev.unifieddesktop.app"
+    // B-132: compileSdk follows the GeckoView 159 AAR's aar-metadata (minCompileSdk=37,
+    // minCompileMinorSdk=2 -> platform android-37.2); targetSdk stays 36 - the
+    // Play-compliant code-loading rule is about targetSdk and does not move.
+    compileSdk = 37
+    compileSdkMinor = 2
     // T13-10 item 5 (B-127 decision): BuildConfig.DEBUG guards the debug-only thermal
     // injection - the release build must not even compile the flag in.
     buildFeatures { buildConfig = true }
@@ -52,4 +57,26 @@ android { namespace = "dev.unifieddesktop.app"; compileSdk = 36
         }
     }
 }
-dependencies { implementation(project(":engine")); implementation("org.tukaani:xz:1.10"); testImplementation("junit:junit:4.13.2"); testImplementation("org.json:json:20240303") }
+dependencies {
+    implementation(project(":engine"))
+    implementation("org.tukaani:xz:1.10")
+    // B-132: the desktop Browser's engine (Firefox 159.0 release; MPL-2.0, see
+    // THIRD_PARTY.md). arm64 only so the AAB stays under 200 MB; other ABIs fall back
+    // to the WebView engine at runtime.
+    implementation("org.mozilla.geckoview:geckoview-arm64-v8a:159.0.20261102144711")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+}
+
+// B-132: GeckoView 159 ships kotlin-stdlib 2.4.20 whose metadata (2.4.0) is too new for
+// AGP 9.4.1's built-in 2.2.0 compiler (the LESSONS round-1 trap). Keep OUR stdlib at the
+// version the compiler matches, and let the compiler read GeckoView's own newer-metadata
+// classes through the documented suppressor (-Xskip-metadata-version-check).
+configurations.all {
+    resolutionStrategy { force("org.jetbrains.kotlin:kotlin-stdlib:2.2.10") }
+}
+kotlin {
+    compilerOptions {
+        freeCompilerArgs.add("-Xskip-metadata-version-check")
+    }
+}
