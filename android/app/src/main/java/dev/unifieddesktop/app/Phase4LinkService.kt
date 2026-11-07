@@ -57,6 +57,19 @@ class Phase4LinkService : Service() {
         const val NSD_TYPE = "_udlink._tcp."
         const val NSD_NAME = "unified-desktop"
 
+        /**
+         * B-127 decision (manager 2026-11-07): a DEBUG-ONLY thermal injection so the D22
+         * hot-stage paired-proof can be captured on demand — the framework override never
+         * reaches this governor (PowerManager.currentThermalStatus ignores it, verified
+         * live in T13-8). Set only through the debug harness broadcast (`p10:thermal N`;
+         * Phase4Dispatch checks BuildConfig.DEBUG and ignores the action in release
+         * builds). It never touches the real thermal signal path: null means the governor
+         * reads the PowerManager exactly as shipped.
+         */
+        @Volatile
+        var debugThermalOverride: Int? = null
+            private set
+
         const val ACTION_START = "dev.unifieddesktop.app.p4.START"
         const val ACTION_STOP = "dev.unifieddesktop.app.p4.STOP"
         const val ACTION_STATUS = "dev.unifieddesktop.app.p4.STATUS"
@@ -70,6 +83,11 @@ class Phase4LinkService : Service() {
          * the video chain can be verified on the phone without a PC attached.
          */
         const val ACTION_P5TEST = "dev.unifieddesktop.app.p5.TEST"
+
+        /** Debug builds only (guard enforced by the caller). Null clears the override. */
+        fun setDebugThermalOverride(v: Int?) {
+            debugThermalOverride = v
+        }
 
         private val running = AtomicBoolean(false)
         private val lastState = AtomicReference("idle")
@@ -279,6 +297,7 @@ class Phase4LinkService : Service() {
         val am = getSystemService(ActivityManager::class.java)
         val pm = getSystemService(PowerManager::class.java)
         val info = ActivityManager.MemoryInfo()
+        var lastLoggedOverride: Int? = null
         while (running.get()) {
             try {
                 if (currentLive == null && !desktopRuntime.isUp()) {
@@ -286,14 +305,19 @@ class Phase4LinkService : Service() {
                     Thread.sleep(2_000L)
                     continue
                 }
+                if (debugThermalOverride != lastLoggedOverride) {
+                    lastLoggedOverride = debugThermalOverride
+                    say("GOVERNOR debug thermal override=$lastLoggedOverride (debug build only; null = the real PowerManager signal)")
+                }
                 am.getMemoryInfo(info)
                 val input = Phase10GovernorInput(
                     lowMemory = info.lowMemory,
                     trimLevel = trimLevel,
                     memAvailableKb = info.availMem / 1024L,
-                    thermalStatus = if (android.os.Build.VERSION.SDK_INT >= 29) {
-                        pm.currentThermalStatus
-                    } else 0,
+                    thermalStatus = ThermalInjection.effectiveThermal(
+                        if (android.os.Build.VERSION.SDK_INT >= 29) pm.currentThermalStatus else 0,
+                        debugThermalOverride,
+                    ),
                     desktopVisible = desktopRuntime.isUp(),
                 )
                 val d = Phase10Governor.next(governorStage, input)

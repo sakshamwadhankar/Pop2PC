@@ -27,6 +27,25 @@ import java.security.MessageDigest
 object Phase2X11 {
     const val TAG = "Phase2"
 
+    /**
+     * ChangeProperty wire lengths, pure so they are unit-tested (B-130): the request's
+     * data-length field counts ITEMS in the property's format, not bytes - one unit per
+     * byte for format=8, one per 2 bytes for format=16, one per 4 bytes (a C long on the
+     * X wire) for format=32. Writing the byte count made every format=32 reply we served
+     * (the TARGETS atom list) claim 4x more data than the request carried, and wine's
+     * clipboard conversion dropped it.
+     */
+    object ChangePropertyWire {
+        fun lengthUnits(dataBytes: Int, format: Int): Int = when (format) {
+            32 -> dataBytes / 4
+            16 -> dataBytes / 2
+            else -> dataBytes
+        }
+
+        /** Request-length field (in 4-byte words): the 6 fixed words plus the data. */
+        fun requestWords(dataBytes: Int): Int = 6 + (dataBytes + 3) / 4
+    }
+
     private val log = StringBuilder()
     fun say(s: String) { android.util.Log.i(TAG, s); log.append(s).append('\n') }
     fun logText(): String = log.toString()
@@ -985,10 +1004,12 @@ object Phase2X11 {
 
         fun clipChangeProperty(window: Int, property: Int, type: Int, format: Int, data: ByteArray) {
             val words = (data.size + 3) / 4
-            put(18); put(0); putShort(6 + words) // ChangeProperty, mode Replace
+            put(18); put(0); putShort(ChangePropertyWire.requestWords(data.size)) // ChangeProperty, mode Replace
             putInt(window); putInt(property); putInt(type)
             put(format and 0xff); put(0); put(0); put(0)
-            putInt(data.size)
+            // B-130: item count for the format (bytes for 8, longs for 32), never the
+            // byte count - a byte count made wine's TARGETS conversion drop our reply.
+            putInt(ChangePropertyWire.lengthUnits(data.size, format))
             out.write(data)
             repeat(words * 4 - data.size) { put(0) }
             out.flush()

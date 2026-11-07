@@ -775,6 +775,23 @@ class HomeActivity : Activity() {
         super.onPause()
     }
 
+    /**
+     * B-103: Android lets us READ the clipboard only while this activity is the focused
+     * app (background reads return null - verified live 2026-11-06). A copy made in
+     * another app fires the clipboard listener while we cannot read it; the text was lost
+     * to the bridge. Read it ONCE here on a true focus gain and feed the same path a PC
+     * push uses. Focus loss and repeats do nothing (Phase11Clip.FocusRead).
+     */
+    private var hadWindowFocus = false
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (Phase11Clip.FocusRead.shouldRead(hasFocus, hadWindowFocus)) {
+            Phase11Clip.onFocusGain(this)
+        }
+        hadWindowFocus = hasFocus
+    }
+
     private val ticker = object : Runnable {
         override fun run() {
             refreshConnection()

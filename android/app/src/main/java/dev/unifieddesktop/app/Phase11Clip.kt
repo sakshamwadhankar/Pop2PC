@@ -22,6 +22,22 @@ import java.util.concurrent.atomic.AtomicLong
 object Phase11Clip {
     const val MAX_BYTES = 1 shl 20
 
+    /**
+     * The B-103 focus-gain decision, pure so it is unit-tested: read the primary clip once
+     * when the app GAINS the display-0 window focus, never on focus loss or repeats.
+     *
+     * Policy constraint (B-103, verified live 2026-11-06): Android 10+ lets an app READ the
+     * clipboard only while it is the focused app - `primaryClip` returns null otherwise, so
+     * a copy made in another app could never reach this bridge while the owner was elsewhere.
+     * The listener still fires on every change; it just cannot read. Reading ONCE on focus
+     * gain picks up whatever was copied in the meantime. Never polled in the background, no
+     * new permissions.
+     */
+    object FocusRead {
+        fun shouldRead(hasWindowFocus: Boolean, hadWindowFocus: Boolean): Boolean =
+            hasWindowFocus && !hadWindowFocus
+    }
+
     private val main = Handler(Looper.getMainLooper())
     private val lastHash = AtomicLong(0)
     private var cm: ClipboardManager? = null
@@ -68,6 +84,32 @@ object Phase11Clip {
         if (payload.isEmpty() || payload.size > MAX_BYTES) return
         val copy = payload.copyOf()
         main.post { applyRemote(copy, "X11") }
+    }
+
+    /**
+     * B-103: the app just gained the display-0 window focus (HomeActivity calls this only
+     * on a true focus GAIN, decided by FocusRead). Android now allows a clipboard READ, so
+     * a copy made in another app while we were in the background can finally be picked up:
+     * read the primary clip once and push it into the same applyRemote path a PC push uses
+     * (echo-guarded, so a no-op when the text is already ours).
+     */
+    fun onFocusGain(ctx: Context) {
+        val m = cm ?: ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        val bytes = try {
+            val clip = m.primaryClip ?: return
+            if (clip.itemCount == 0) return
+            val text = clip.getItemAt(0).text?.toString() ?: return
+            if (text.isEmpty()) return
+            val b = text.toByteArray(Charsets.UTF_8)
+            if (b.size > MAX_BYTES) {
+                Phase4Log.say(ctx, "P11CLIP focus ${b.size} bytes > cap, not sent")
+                return
+            }
+            b
+        } catch (_: Throwable) {
+            return
+        }
+        applyRemote(bytes, "focus")
     }
 
     private fun applyRemote(bytes: ByteArray, source: String = "PC") {

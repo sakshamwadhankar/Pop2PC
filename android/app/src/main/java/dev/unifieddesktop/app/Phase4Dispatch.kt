@@ -98,6 +98,20 @@ object Phase4Dispatch {
                     }
                     "p12warm" -> Phase4Log.say(ctx, Phase12Preload.configure(arg))
                     "p12nppwarm" -> Phase4Log.say(ctx, Phase12Preload.configureNpp(arg))
+                    // B-127 decision (manager 2026-11-07): `p10:thermal N` injects the
+                    // governor's thermal input for the D22 paired-proof. DEBUG BUILDS ONLY:
+                    // ThermalInjection.parse ignores the action on a release build, so the
+                    // shipped governor always reads the real PowerManager signal. `0`
+                    // clears the override.
+                    "p10" -> {
+                        val injected = ThermalInjection.parse(arg, BuildConfig.DEBUG)
+                        if (injected == null) {
+                            Phase4Log.say(ctx, "P10THERMAL ignored [$arg] (release build or malformed)")
+                        } else {
+                            Phase4LinkService.setDebugThermalOverride(if (injected == 0) null else injected)
+                            Phase4Log.say(ctx, "P10THERMAL set=$injected (debug=${BuildConfig.DEBUG})")
+                        }
+                    }
                     else -> Phase4Log.say(ctx, "PHASE4X unknown [$what]")
                 }
             } catch (t: Throwable) {

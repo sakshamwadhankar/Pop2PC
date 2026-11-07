@@ -1,6 +1,9 @@
 plugins { id("com.android.application") }
 
 android { namespace = "dev.unifieddesktop.app"; compileSdk = 36
+    // T13-10 item 5 (B-127 decision): BuildConfig.DEBUG guards the debug-only thermal
+    // injection - the release build must not even compile the flag in.
+    buildFeatures { buildConfig = true }
     defaultConfig { applicationId = "dev.unifieddesktop.app"; minSdk = 29; targetSdk = 36; versionCode = 1; versionName = "0.1" }
     // libbox64.so must be extracted to nativeLibraryDir so it can be executed (C1: only
     // files from nativeLibraryDir run; everything else is data).

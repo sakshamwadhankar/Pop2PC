@@ -30,6 +30,24 @@ data class Phase10GovernorInput(
     val desktopVisible: Boolean,
 )
 
+/**
+ * B-127 decision (manager 2026-11-07): the D22 debug thermal injection, pure so it is
+ * unit-tested. `parse` turns the `p10:thermal N` harness argument into the value to
+ * inject - but ONLY on a debug build; release builds ignore the action entirely (null).
+ * `effectiveThermal` is the one line the governor's sample loop uses: the override wins
+ * when set, otherwise the real PowerManager signal flows exactly as shipped.
+ */
+object ThermalInjection {
+    /** @return 0..5 (0 = clear back to the real signal), or null = ignore the action. */
+    fun parse(arg: String, isDebugBuild: Boolean): Int? {
+        if (!isDebugBuild) return null
+        val n = arg.trim().removePrefix("thermal").trim().toIntOrNull() ?: return null
+        return if (n in 0..5) n else null
+    }
+
+    fun effectiveThermal(pmStatus: Int, override: Int?): Int = override ?: pmStatus
+}
+
 data class Phase10GovernorDecision(
     val previous: Phase10GovernorStage,
     val next: Phase10GovernorStage,
