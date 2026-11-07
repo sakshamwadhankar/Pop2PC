@@ -1,4 +1,4 @@
-T13-9: done 7 of 7, manager-reviewed 2026-11-07 (B-128 fix verified and committed; B-110 closed; B-129/B-130 filed; docs updated). Now: T13-10 (B-130 fix + B-103 focus-gain re-read + paste retest + D22 debug-injection proof), then Phase 14 needs the product name (DECISIONS D12).
+T13-10: done 6 of 6, manager-reviewed 2026-11-07 (B-130/B-103/D22 verified and committed as c75f786; PHASE 13 COMPLETE). Now: Phase 14 — PopToPC rename + Play preparation (owner uploads to Play Console).
 
 # Night run: Phase 12 finish + Phase 13 polish
 

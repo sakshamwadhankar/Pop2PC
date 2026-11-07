@@ -6,12 +6,15 @@ corrects it after review.
 
 ## Now
 
-- **Position (2026-11-07, manager review): Phase 13 is two items from closed - after T13-9,
-  B-128 is FIXED and committed (the VS Code editor typing gate is closed), and the only
-  remaining work is B-103 (Android->Wine clipboard paste; blockers isolated, T13-10 plan
-  ready) and the D22 live hot-stage proof (debug injection approved per the B-127 decision).
-  Phase 14 has not started and still needs the product name (DECISIONS D12).** Everything
-  below is `phone`-verified on `2c0f6edc` unless marked otherwise.
+- **Position (2026-11-07, manager review): PHASE 13 IS COMPLETE.** T13-10 closed the last two
+  items with live proof: B-130 fixed (ChangePropertyWire), B-103 fixed END-TO-END (focus-gain
+  re-read + wine conversion; marker `FOCUSDROP1` pasted into Notepad++ through the real
+  product path), and the D22 hot-stage paired-proof captured via the manager-approved
+  debug-only thermal injection (release-guarded, 5 unit tests). Gates: Android 247/0/3,
+  cargo 103/0, clippy 0, diff-check 0. Evidence: `Temp\opencode\t13-10\RESULT.txt` +
+  `D22-RESULT.txt`. **Phase 14 opens next: the product name is `PopToPC` (DECISIONS D12,
+  owner 2026-11-07) — rename + Play preparation.** Everything below is `phone`-verified on
+  `2c0f6edc` unless marked otherwise.
 - **Phase 12 round 4 (2026-11-01, final tree): 6 pass, 2 miss.**
   - PASS: connect 0.944 s; Wi-Fi typing **p50 107.1 / p90 119.6 ms** (n=100, 5 GHz, no adb
     forward); moving-window fps 42.0; VS Code 13.48 s cold; old-PC 1080p proxy; governor drop.

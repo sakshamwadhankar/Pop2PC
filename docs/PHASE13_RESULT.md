@@ -226,3 +226,32 @@ Verdict: **PHASE 13 NOT COMPLETE** - remaining: (1) B-103 Android->Wine clipboar
 (T13-10 plan: B-130 fix + focus-gain re-read + end-to-end retest), (2) the D22 live
 hot-stage proof (manager-approved debug injection per the B-127 decision, real-heat
 multi-window attempt alongside).
+
+## 10. T13-10 closure run (2026-11-07, manager-verified) — PHASE 13 COMPLETE
+
+Run: 2026-11-07 08:50 - 09:45, phone `2c0f6edc`, HEAD `02fde68` -> `29974ad` during the run
+(manager docs commits; no conflict). Product code changed ONLY where the task named it:
+`Phase2X11.kt` (B-130), `Phase11Clip.kt` + `HomeActivity.kt` (focus-gain re-read),
+`Phase4LinkService.kt` + `Phase4Dispatch.kt` + `Phase10Governor.kt` + `build.gradle.kts`
+(debug-only thermal injection), plus three new unit-test files. Committed by the manager as
+`c75f786` after re-deriving the evidence.
+
+| Item | Result | Evidence |
+|---|---|---|
+| B-130 | **FIXED** — pure `ChangePropertyWire.lengthUnits` (32 -> bytes/4, 16 -> bytes/2, 8 -> bytes) + `requestWords`; 6 unit tests; live: wine requested UTF8_STRING and consumed the full 7773-byte serve at 09:07:12 | `Phase2X11ChangePropertyTest`, `logcat-item3.log` |
+| B-103 phone half | **FIXED** — manager-approved focus-gain re-read (`FocusRead` pure decision + `onWindowFocusChanged`); unfocused copy unread (bug reproduced) -> focus gain -> `P11CLIP <- focus len=10 sha=bbb767f7` -> X11 claim in 100 ms; 3 unit tests | `Phase11ClipFocusReadTest`, `logcat-item3.log` |
+| B-103 end-to-end | **PASTE PROVEN** — `FOCUSDROP1` set while unfocused, read on focus gain, served at paste time (`served request target=238 len=10` 09:18:20.743), landed in Notepad++ (doc = exactly `FOCUSDROP1`; the 7,838-char selection replaced) | `item4-3-paste.png`, `logcat-item3.log` |
+| D22 hot-stage | **PAIRED-PROOF CAPTURED** via the manager-approved debug-only injection (`BuildConfig.DEBUG`-guarded; release ignores; 5 unit tests; shipped thermal path untouched): ladder x3 (StopHiddenWindows -> SetFps(30) -> SetFps(15) -> LowerResolution -> WarnPc, 2.005/2.005/2.002/2.097 s spacing), no display resize, NPP rect identical across the ladder, p6:shot 1728x1080 (encoder rebuilt in-session to 1296x816@30), VSTAT dropped=0, hot drag 27.3/29.0 fps, WarnPc text at the PC, recovery to 1728x1080 at baseline fps (42.9/54.0 vs 43.9/52.0) | `D22-RESULT.txt`, `logcat-d22.log`, `drag-d22-*.json`, `Phase10ThermalInjectionTest` |
+
+Recorded hiccups (no action needed): one Ctrl+V dropped by a transient X11 reconnect (retry
+converted; worth a post-launch look); the NPP Save-As dialog did not open under XTEST so the
+paste proof stands on the window capture + serve log (the task accepted this); the first
+injection broadcast needed the device-shell space escaped (`p10:thermal\ 3`). Final gates:
+Android 247/0/3 + lint + assemble, cargo 103/0, clippy 0, diff-check 0. Cleanup verified
+(0 app processes, 0 receivers, 0 forwards, stay_on 0, timeout 1800000, Wi-Fi as found,
+no call, workspace untouched, gradle daemon stopped).
+
+**VERDICT: PHASE 13 IS COMPLETE.** Every phase gate has live phone evidence; the remaining
+SKIPS rows (Phase 12 misses awaiting the owner's written acceptance, Windows 10 proof, Phase 10
+resource-pressure partial) are documented limitations that do not block Phase 14. Phase 14
+opens with the owner-chosen name **PopToPC** (DECISIONS D12).
