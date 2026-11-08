@@ -97,10 +97,38 @@ class AndroidWindowContent(context: Context, private val guestPackage: String) :
                 }
                 P7Log.say(context, "P7AND import ok=${imp.ok} ${imp.message ?: ""}")
                 if (!imp.ok) return@Thread
-                // B1: the guest launches normally; GuestPresentationHost moves its decor into a
-                // Presentation on the "phase1-owned" display we just created (the one whose
-                // output surface is this window's TextureView SurfaceTexture).
-                val res = engine.launchPathB1(guestPackage, d.display.displayId)
+                val displayId = d.display.displayId
+                // B-008 attempt (b): ask the engine to start the guest's stub directly on this
+                // private display. Expected to be denied by the platform on the first launch
+                // (see B008Policy); any refusal falls back to the proven B1 path.
+                var directOk = false
+                var res = if (B008Policy.displayFirst(displayId, imp.ok)) {
+                    val direct = engine.launch(guestPackage, displayId)
+                    directOk = direct.ok
+                    P7Log.say(
+                        context,
+                        "B008B direct display launch displayId=$displayId ok=${direct.ok} " +
+                            (direct.message ?: ""),
+                    )
+                    if (direct.ok) direct else engine.launchPathB1(guestPackage, displayId)
+                } else {
+                    engine.launchPathB1(guestPackage, displayId)
+                }
+                // B-008 attempt (a): on the B1 path the guest's placeholder task covers display
+                // 0; bring the home task to the front over it instead of moving the guest.
+                if (B008Policy.homeToFront(directOk, res.ok)) {
+                    view.postDelayed({
+                        try {
+                            context.startActivity(
+                                android.content.Intent(context, HomeActivity::class.java)
+                                    .addFlags(B008Policy.HOME_TO_FRONT_FLAGS),
+                            )
+                            P7Log.say(context, "B008A home-to-front sent")
+                        } catch (t: Throwable) {
+                            P7Log.say(context, "B008A home-to-front failed: $t")
+                        }
+                    }, B008Policy.HOME_TO_FRONT_DELAY_MS)
+                }
                 P7Log.say(context, "P7AND launch pathB1 ok=${res.ok} ${res.message ?: ""}")
             } catch (t: Throwable) {
                 P7Log.say(context, "P7AND fail $t")

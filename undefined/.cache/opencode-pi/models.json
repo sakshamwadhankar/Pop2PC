@@ -1,35 +1,16 @@
 {
-  "fetchedAt": 1794070411118,
+  "fetchedAt": 1794143161123,
   "models": [
     {
-      "id": "big-pickle",
-      "name": "Big Pickle",
+      "id": "mimo-v2.6-flash-free",
+      "name": "MiMo-V2.6-Flash Free",
       "reasoning": true,
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "context": 200000,
       "output": 32000
-    },
-    {
-      "id": "nemotron-3.5-lightning-free",
-      "name": "Nemotron 3.5 Lightning Free",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "context": 262144,
-      "output": 262144
-    },
-    {
-      "id": "beam-free",
-      "name": "Beam Free",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "context": 1048576,
-      "output": 131072
     },
     {
       "id": "crouton-alpha-free",
@@ -43,33 +24,11 @@
       "output": 270000
     },
     {
-      "id": "iceman-free",
-      "name": "Iceman Free",
+      "id": "beam-free",
+      "name": "Beam Free",
       "reasoning": true,
       "input": [
         "text"
-      ],
-      "context": 262144,
-      "output": 131072
-    },
-    {
-      "id": "mimo-v2.6-flash-free",
-      "name": "MiMo-V2.6-Flash Free",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
-      ],
-      "context": 200000,
-      "output": 32000
-    },
-    {
-      "id": "inkling-2-small-free",
-      "name": "Inkling 2 Small Free",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
       ],
       "context": 1048576,
       "output": 131072
@@ -86,14 +45,25 @@
       "output": 131072
     },
     {
-      "id": "flint-40b-free",
-      "name": "Flint 40B Free",
+      "id": "iceman-free",
+      "name": "Iceman Free",
       "reasoning": true,
       "input": [
         "text"
       ],
       "context": 262144,
-      "output": 65536
+      "output": 131072
+    },
+    {
+      "id": "deepseek-v4.1-flash-free",
+      "name": "DeepSeek V4.1 Flash Free",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "context": 200000,
+      "output": 32000
     },
     {
       "id": "glm-5.3-flash-free",
@@ -107,15 +77,45 @@
       "output": 32000
     },
     {
-      "id": "deepseek-v4.1-flash-free",
-      "name": "DeepSeek V4.1 Flash Free",
+      "id": "flint-40b-free",
+      "name": "Flint 40B Free",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "context": 262144,
+      "output": 65536
+    },
+    {
+      "id": "nemotron-3.5-lightning-free",
+      "name": "Nemotron 3.5 Lightning Free",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "context": 262144,
+      "output": 262144
+    },
+    {
+      "id": "big-pickle",
+      "name": "Big Pickle",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "context": 200000,
+      "output": 32000
+    },
+    {
+      "id": "inkling-2-small-free",
+      "name": "Inkling 2 Small Free",
       "reasoning": true,
       "input": [
         "text",
         "image"
       ],
-      "context": 200000,
-      "output": 32000
+      "context": 1048576,
+      "output": 131072
     }
   ]
 }

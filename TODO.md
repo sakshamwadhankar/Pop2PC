@@ -1,4 +1,4 @@
-T15-1: done 5 of 5. Updated 14:35. Now: finished — items 1/2/5 done (VS Code fixed + live progress), item 3 B-008 NOT fixed (root cause + measurements in t15-1/RESULT.txt), item 4 partial (GitHub 504 on the Box64 bundle blocks the live wine resume proof). Cleanup done.
+T15-2B: COMPLETE 2026-11-09 00:56. B-008 (b) proven impossible live; (a) measured FAIL (home-to-front stops the guest, PC black at +8 s/+20 s) -> B008Policy.HOME_TO_FRONT=false, no-move guard stays, B-008 OPEN. Gates: Android 316/0/3, cargo 103/0, clippy 0, diff-check 0, AAB 171,994,838 B. Report: Temp\opencode\t15-2\RESULT.txt.
 
 # Night run: Phase 12 finish + Phase 13 polish
 

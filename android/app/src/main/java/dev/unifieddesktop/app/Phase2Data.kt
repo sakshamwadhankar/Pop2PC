@@ -103,7 +103,27 @@ object Phase2Data {
     }
 
     const val BUNDLE_URL = "https://github.com/ptitSeb/box64/releases/download/v0.4.4/box64-bundle-x86-libs-v0.4.4.tar.gz"
+    /** B-137: second host for the SAME artifact (a GitHub-release proxy). Verified on the
+     *  laptop 2026-11-08: full 34,368,070 B download, SHA-256 identical to [BUNDLE_SHA256]. */
+    const val BUNDLE_MIRROR_URL = "https://ghfast.top/https://github.com/ptitSeb/box64/releases/download/v0.4.4/box64-bundle-x86-libs-v0.4.4.tar.gz"
+    /** The mirror ladder: primary first, then the mirror; both use the same Range/resume path. */
+    val BUNDLE_URLS: List<String> = bundleLadder(BUNDLE_URL, listOf(BUNDLE_MIRROR_URL))
     const val BUNDLE_SHA256 = "1d4a8787a8a92267c1be673ec194c69e3bb33d14c800575d94131084142fcff0" // verified locally at download
+    /** Where the bundle unpacks inside rootfs. */
+    const val BUNDLE_DIR = "usr/lib/box64-x86_64-linux-gnu"
+    /** Written after a verified unpack (or adopted from a pre-manifest tree). */
+    const val BUNDLE_MANIFEST = ".ud-bundle-manifest"
+    /** A pre-manifest tree is adopted only when these files hash exactly (B-137). */
+    val BUNDLE_SENTINELS: Map<String, String> = mapOf(
+        "libz.so.1.2.11" to "4d3dac7a48e8f147507f818eda0c5afafd0846d163b997ad24b3e2e4c791f039",
+        "libstdc++.so.6.0.29" to "393e59da2905e574015ba4077cf7a69caac6939202aa7dafb6aacf4550eeea4e",
+        "libssl.so.1.1.1k" to "b27663465a06280d172eb734e5027ef7d8cf7580b88cf35c44855f8d503ae415",
+        "libsqlite3.so.0.8.6" to "120464ffbc235cb5ecd744d5c2a97a2020aa9e53331fc80e374d292e3ccefedc",
+        "libzstd.so.1.5.1" to "cde3f28d863b2b318778afb831a77c86389ea2bfe616c1badc18631f599d8dbe",
+    )
+    /** usr/lib/box64-x86_64-linux-gnu holds 290 files/symlinks + 17 dirs (307 entries
+     *  recursively; verified from the pinned tarball). Adoption needs a full tree. */
+    const val BUNDLE_ADOPT_MIN_ENTRIES = 250
     const val NPP_URL = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.8.1/npp.8.9.8.1.portable.x64.zip"
     const val NPP_SHA256 = "beddf5548e75c97930d1575ba1c7d113e6e2b33d0a200310e734ca08e225f414"
 
@@ -151,6 +171,116 @@ object Phase2Data {
         val md = MessageDigest.getInstance("SHA-256").digest(b)
         return md.joinToString("") { "%02x".format(it) }
     }
+
+    private fun sha256OrNull(f: File): String? = try {
+        if (f.isFile) sha256(f) else null
+    } catch (_: Throwable) { null }
+
+    // ---------- B-137: idempotent bundle bootstrap + mirror ladder ----------
+
+    /** Pure mirror ladder: primary first, then each mirror, trimmed/deduped. Unit-tested. */
+    fun bundleLadder(primary: String, mirrors: List<String>): List<String> =
+        (listOf(primary) + mirrors).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+
+    /** Parse the manifest's pinned digest; null when absent/malformed. */
+    fun parseBundleManifest(text: String?): String? {
+        val v = text?.lineSequence()?.map { it.trim() }
+            ?.firstOrNull { it.startsWith("sha256=") }
+            ?.substringAfter('=')?.trim()
+        return v?.takeIf { it.length == 64 && it.all { c -> c in "0123456789abcdef" } }
+    }
+
+    fun bundleManifestText(sha: String): String = "sha256=$sha\n"
+
+    /**
+     * Pure skip decision (unit-tested): the unpacked tree is only trusted when it exists,
+     * its manifest names the pinned bundle digest, and the sentinel files still hash
+     * correctly. Anything else falls through to a (resumable, mirrored) fetch.
+     */
+    fun bundleSkip(
+        manifestSha: String?,
+        expectedSha: String,
+        sentinelsOk: Boolean,
+        present: Boolean,
+    ): Boolean = present && sentinelsOk && manifestSha != null && manifestSha == expectedSha
+
+    /** All [BUNDLE_SENTINELS] present and byte-identical. */
+    internal fun bundleSentinelsOk(dir: File): Boolean =
+        BUNDLE_SENTINELS.all { (rel, want) -> sha256OrNull(File(dir, rel)) == want }
+
+    /**
+     * Is the unpacked bundle already good? Reads [BUNDLE_MANIFEST]; a tree unpacked before
+     * the manifest existed is ADOPTED once its sentinels + entry count prove it is the
+     * pinned bundle (B-137: existing installs must not re-download 34 MB).
+     */
+    internal fun bundleTreeVerified(
+        dir: File,
+        expectedSha: String,
+        sentinelCheck: (File) -> Boolean = ::bundleSentinelsOk,
+        log: (String) -> Unit = { say(it) },
+    ): Boolean {
+        if (!dir.isDirectory) return false
+        // Recursive: the top level of BUNDLE_DIR is only ~85 entries (most libs are
+        // symlinks into it), so a top-level count can never prove a full tree.
+        val entries = dir.walkTopDown().count()
+        val manifestSha = try {
+            parseBundleManifest(File(dir, BUNDLE_MANIFEST).takeIf { it.isFile }?.readText())
+        } catch (_: Throwable) { null }
+        val sentinelsOk = sentinelCheck(dir)
+        if (bundleSkip(manifestSha, expectedSha, sentinelsOk, entries > 0)) {
+            log("BUNDLE skip tree verified sha=${expectedSha.take(16)}e entries=$entries")
+            return true
+        }
+        if (manifestSha != null) {
+            log(
+                "BUNDLE tree refetch manifest=${manifestSha.take(16)}e " +
+                    "sentinels=$sentinelsOk entries=$entries",
+            )
+            return false
+        }
+        if (sentinelsOk && entries >= BUNDLE_ADOPT_MIN_ENTRIES) {
+            try {
+                File(dir, BUNDLE_MANIFEST).writeText(bundleManifestText(expectedSha))
+                log("BUNDLE adopted existing tree entries=$entries sha=${expectedSha.take(16)}e")
+                return true
+            } catch (t: Throwable) {
+                log("BUNDLE adopt failed ${t.javaClass.simpleName}: ${t.message?.take(80)}")
+            }
+        }
+        log("BUNDLE tree absent/incomplete entries=$entries sentinels=$sentinelsOk -> fetch")
+        return false
+    }
+
+    /**
+     * Download with the mirror ladder. A network cut keeps the partial so the next URL
+     * resumes it (the proven Range/206 path); a sha mismatch means the bytes are bad, so
+     * the partial is deleted before the next URL. Unit-tested.
+     */
+    internal fun downloadWithMirrors(
+        dir: File,
+        urls: List<String>,
+        sha: String,
+        name: String,
+        log: (String) -> Unit = { say(it) },
+        progress: ((Long, Long) -> Unit)? = null,
+    ): File {
+        var last: Throwable? = null
+        for ((i, url) in urls.withIndex()) {
+            try {
+                if (i > 0) log("DL $name mirror ${i + 1}/${urls.size} $url")
+                return download(dir, url, sha, name, log, progress)
+            } catch (t: Throwable) {
+                last = t
+                log(
+                    "DL $name url ${i + 1}/${urls.size} failed " +
+                        "(${t.javaClass.simpleName}: ${t.message?.take(100)})",
+                )
+                if (t is IllegalStateException) File(dir, name).delete()
+            }
+        }
+        throw last ?: java.io.IOException("no URL for $name")
+    }
+
 
     private fun download(
         ctx: Context,
@@ -818,15 +948,40 @@ object Phase2Data {
     private const val RETRIES = 3
 
     fun fetchBundle(ctx: Context) {
-        val t0 = System.currentTimeMillis()
-        val gztar = download(ctx, BUNDLE_URL, BUNDLE_SHA256, "bundle.tar.gz")
-        val rootfs = rootfsDir(ctx); rootfs.mkdirs()
-        GZIPInputStream(BufferedInputStream(FileInputStream(gztar))).use { readTar(it, rootfs, "bundle.tar.gz") }
-        val d = File(rootfs, "usr/lib/box64-x86_64-linux-gnu")
-        val count = if (d.isDirectory) d.walkTopDown().filter { it.isFile }.count() else 0
-        val t1 = System.currentTimeMillis()
-        say("BUNDLE unpacked ms=${t1 - t0} bundleFiles=$count")
+        fetchBundleTo(rootfsDir(ctx), downloadsDir(ctx), BUNDLE_URLS, BUNDLE_SHA256)
         writeLog(ctx)
+    }
+
+    /**
+     * B-137: the bundle half of the bootstrap. Skips the network entirely when the tree
+     * is already verified; otherwise fetches through the mirror ladder and unpacks, then
+     * writes the manifest so the next bootstrap skips. Split out so a JVM test can prove
+     * the fetch+unpack path against a local server.
+     */
+    internal fun fetchBundleTo(
+        rootfs: File,
+        downloads: File,
+        urls: List<String>,
+        sha: String,
+        log: (String) -> Unit = { say(it) },
+        sentinelCheck: (File) -> Boolean = ::bundleSentinelsOk,
+    ) {
+        val t0 = System.currentTimeMillis()
+        val d = File(rootfs, BUNDLE_DIR)
+        if (bundleTreeVerified(d, sha, sentinelCheck, log)) return
+        val gztar = downloadWithMirrors(downloads, urls, sha, "bundle.tar.gz", log)
+        rootfs.mkdirs()
+        GZIPInputStream(BufferedInputStream(FileInputStream(gztar))).use {
+            readTar(it, rootfs, "bundle.tar.gz")
+        }
+        val count = if (d.isDirectory) d.walkTopDown().filter { it.isFile }.count() else 0
+        try {
+            d.mkdirs()
+            File(d, BUNDLE_MANIFEST).writeText(bundleManifestText(sha))
+        } catch (t: Throwable) {
+            log("BUNDLE manifest write failed ${t.javaClass.simpleName}: ${t.message?.take(80)}")
+        }
+        log("BUNDLE unpacked ms=${System.currentTimeMillis() - t0} bundleFiles=$count")
     }
 
     fun fetchNpp(ctx: Context) {

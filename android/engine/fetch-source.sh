@@ -348,6 +348,57 @@ if marker not in text:
 path.write_text(text.replace(marker, replacement, 1))
 PY
 
+# B-008 (T15-2, attempt b): the engine DROPPED the launch options on the new-task path, so a
+# caller's ActivityOptions.setLaunchDisplayId was silently ignored (measured T15-1: the guest
+# task still landed on display 0). Forward the options bundle so the host can ASK for the
+# guest stub to start directly on its own private display. The platform still runs its
+# isCallerAllowedToLaunchOnDisplay check (AOSP ActivityTaskSupervisor): an app-made display is
+# untrusted, so the first launch is expected to be DENIED (no allowEmbedded on the stub, no
+# ACTIVITY_EMBEDDING permission, none of our uid's activities on the display yet); the host
+# treats code < 0 as "not possible" and falls back to the proven B1 decor-move path.
+python3 - "$VENDOR/source/Bcore/src/main/java/top/niunaijun/blackbox/core/system/am/ActivityStack.java" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+call_old = """        if (taskRecord == null || taskRecord.needNewTask()) {
+            return startActivityInNewTaskLocked(userId, intent, activityInfo, resultTo, launchModeFlags);
+        }"""
+call_new = """        if (taskRecord == null || taskRecord.needNewTask()) {
+            return startActivityInNewTaskLocked(userId, intent, activityInfo, resultTo, launchModeFlags, options);
+        }"""
+sig_old = """    private int startActivityInNewTaskLocked(int userId, Intent intent, ActivityInfo
+            activityInfo, IBinder resultTo, int launchMode) {"""
+sig_new = """    private int startActivityInNewTaskLocked(int userId, Intent intent, ActivityInfo
+            activityInfo, IBinder resultTo, int launchMode, Bundle options) {"""
+start_old = """        BlackBoxCore.getContext().startActivity(shadow);
+        return 0;
+    }"""
+start_new = """        // B-008: forward the caller's options (may be null); a launch-display request now
+        // reaches the real ActivityManager instead of being dropped here. A platform denial
+        // (SecurityException, e.g. launch on an untrusted app-made display) MUST surface as
+        // a negative code: measured 2026-11-08 that without this catch the denial is
+        // swallowed, startActivityAms still answers 0, and the guest silently never starts.
+        try {
+            BlackBoxCore.getContext().startActivity(shadow, options);
+        } catch (Throwable t) {
+            Log.w(TAG, "B008 startActivity failed: " + t);
+            return -1;
+        }
+        return 0;
+    }"""
+for old, new, label in ((call_old, call_new, "new-task call site"),
+                        (sig_old, sig_new, "new-task signature"),
+                        (start_old, start_new, "startActivity options")):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"B-008 ActivityStack {label}: expected 1 marker, found {count}")
+    text = text.replace(old, new, 1)
+path.write_text(text)
+PY
+
 # Slot ownership and host-identity fixes.  Proxy service Intents can be delayed by the real
 # ActivityManager.  Record the process generation that selected the proxy slot, reject a stale
 # Intent before loading its guest class, and keep system-facing package/UID pairs host-consistent.
