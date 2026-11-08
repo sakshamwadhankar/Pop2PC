@@ -1,4 +1,4 @@
-T14-3: done 6 of 6, manager-reviewed 2026-11-07 (B-135/B-136 fixed and committed; resume mechanism proven live; fallback hardened; upstream drafts ready). Now: OWNER steps - back up the keystore, upload the AAB to Play Console (docs/PLAY_LISTING.md), submit the upstream reports.
+T15-1: done 5 of 5. Updated 14:35. Now: finished — items 1/2/5 done (VS Code fixed + live progress), item 3 B-008 NOT fixed (root cause + measurements in t15-1/RESULT.txt), item 4 partial (GitHub 504 on the Box64 bundle blocks the live wine resume proof). Cleanup done.
 
 # Night run: Phase 12 finish + Phase 13 polish
 

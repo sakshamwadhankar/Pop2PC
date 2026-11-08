@@ -56,6 +56,17 @@ class Phase2DataResumeTest {
         assertNull(Phase2Data.parseContentRangeStart("unsupported"))
     }
 
+    /** T15-1 progress: the resumed fetch's total comes from the same header. */
+    @Test
+    fun contentRange_total_parsed() {
+        assertEquals(789L, Phase2Data.parseContentRangeTotal("bytes 123-456/789"))
+        assertEquals(100L, Phase2Data.parseContentRangeTotal("bytes 0-99/100"))
+        assertEquals("a '*' start still names the total (416 shape)", 100L,
+            Phase2Data.parseContentRangeTotal("bytes */100"))
+        assertNull(Phase2Data.parseContentRangeTotal(null))
+        assertNull(Phase2Data.parseContentRangeTotal("unsupported"))
+    }
+
     /** Offset math: 206 with a matching echo resumes; everything else restarts clean. */
     @Test
     fun offset_math() {
@@ -142,7 +153,7 @@ class Phase2DataResumeTest {
         srv.start()
         try {
             val dir = tmp.newFolder()
-            val f = Phase2Data.download(dir, "http://127.0.0.1:${srv.port}/wine.tar", sha, "wine.tar") { }
+            val f = Phase2Data.download(dir, "http://127.0.0.1:${srv.port}/wine.tar", sha, "wine.tar", log = { })
             assertEquals("the file completed after the resume", body.size.toLong(), f.length())
             assertEquals("final sha verified as today", sha, sha256(f))
             assertTrue("at least ONE resume request was sent",
@@ -160,7 +171,7 @@ class Phase2DataResumeTest {
         srv.start()
         try {
             val dir = tmp.newFolder()
-            val f = Phase2Data.download(dir, "http://127.0.0.1:${srv.port}/wine.tar", sha, "wine.tar") { }
+            val f = Phase2Data.download(dir, "http://127.0.0.1:${srv.port}/wine.tar", sha, "wine.tar", log = { })
             assertEquals(body.size.toLong(), f.length())
             assertEquals(sha, sha256(f))
             // The server answered every request 200; no resume was possible.
@@ -177,7 +188,7 @@ class Phase2DataResumeTest {
         val dir = tmp.newFolder()
         val f = File(dir, "wine.tar")
         FileOutputStream(f).use { it.write(body) }
-        val got = Phase2Data.download(dir, "http://127.0.0.1:1/nothing", sha, "wine.tar") { }
+        val got = Phase2Data.download(dir, "http://127.0.0.1:1/nothing", sha, "wine.tar", log = { })
         assertEquals(body.size.toLong(), got.length())
     }
 

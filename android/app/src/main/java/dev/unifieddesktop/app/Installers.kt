@@ -359,9 +359,32 @@ object Installers {
             "APPCTR winget $appId id=${m.identifier} v=${m.version} type=${m.type} " +
                 "sha=${m.sha256.take(12)}… url=${m.url}",
         )
+        // T15-1: a fresh install has no Wine runtime; the first Windows app pays a ~102 MB
+        // fetch (T14-3 kept an 87.4 MB partial, completed by the Range/206 resume). Report
+        // it so the App Center row never looks frozen; boot() re-checks it cheaply below.
+        var lastRuntimeKey = -1
+        val runtimeReady = Phase2Data.ensureWineRuntime(ctx) { bytes, total ->
+            val key = if (total > 0) (100.0 * bytes / total).toInt() else (bytes / (1 shl 20)).toInt()
+            if (key != lastRuntimeKey) {
+                lastRuntimeKey = key
+                post(ProgressText.line("Preparing Windows runtime", bytes, total))
+            }
+        }
+        if (!runtimeReady) {
+            P7Log.say(ctx, "APPCTR winget $appId runtime fetch failed")
+            return "Windows runtime download failed - check your connection and try again"
+        }
         // The manifest SHA-256 is upper-case; the downloader compares lower-case hex.
+        var lastInstallerKey = -1
         val exe = Phase2Data.download(
             Phase2Data.downloadsDir(ctx), m.url, m.sha256.lowercase(), "$appId-${m.version}.${ext(m.type)}",
+            progress = { bytes, total ->
+                val key = if (total > 0) (100.0 * bytes / total).toInt() else (bytes / (1 shl 20)).toInt()
+                if (key != lastInstallerKey) {
+                    lastInstallerKey = key
+                    post(ProgressText.line("Downloading $appName", bytes, total))
+                }
+            },
         )
         P7Log.say(ctx, "APPCTR winget $appId downloaded bytes=${exe.length()}")
         post("running ${m.identifier} ${m.silent} under Wine...")

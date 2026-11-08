@@ -295,7 +295,7 @@ object Phase3Data {
      * item 5).
      */
     @Synchronized
-    fun fetch(ctx: Context, force: Boolean = false) {
+    fun fetch(ctx: Context, force: Boolean = false, progress: ((Long, Long) -> Unit)? = null) {
         val t0 = System.currentTimeMillis()
         val pin = pinForDevice()
         if (pin == null) {
@@ -305,7 +305,11 @@ object Phase3Data {
         say("CS_PIN abi=${pin.abi} deb=${pin.file} bytes=${pin.bytes} sha=${pin.sha256} " +
                 "abilist=${Build.SUPPORTED_ABIS.joinToString(",")}")
         val deb = try {
-            Phase2Data.download(downloads(ctx), pin.url, pin.sha256, pin.file) { say("CSDL $it") }
+            Phase2Data.download(
+                downloads(ctx), pin.url, pin.sha256, pin.file,
+                log = { say("CSDL $it") },
+                progress = progress,
+            )
         } catch (t: Throwable) {
             say("CS FAIL download ${pin.url}: $t")
             return Phase3Native.writeLog(ctx)

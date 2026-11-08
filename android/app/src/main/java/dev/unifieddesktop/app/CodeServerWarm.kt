@@ -25,6 +25,7 @@ object CodeServerWarm {
     fun ensureRunning(
         context: Context,
         timeoutMs: Long = CodeServerGate.MAX_MS,
+        statusCallback: ((String) -> Unit)? = null,
     ): Result {
         val t0 = android.os.SystemClock.elapsedRealtime()
         val sf = Phase3Server.sessionFile(context)
@@ -47,6 +48,43 @@ object CodeServerWarm {
             P7Log.say(context, "VSCODE reuse port=$port login=${if (cookie != null) "ok" else "FAIL"}")
             return Result(false, cookie != null, port,
                 android.os.SystemClock.elapsedRealtime() - t0, cookie)
+        }
+        // If code-server is not yet staged (fresh install: entry.js missing), fetch it
+        // first. This is the common case on a real user's first VS Code open. The ~117 MB
+        // deb is downloaded with the T14-3 resume mechanism (Range/206, kept partial).
+        val entry = java.io.File(Phase3Data.root(context), "out/node/entry.js")
+        if (!entry.isFile) {
+            P7Log.say(context, "VSCODE entry missing — fetching code-server now")
+            // T15-1: report live progress (percent of the pinned deb against its known
+            // byte count, in MB) so a first-run staging fetch never looks frozen. Throttled
+            // to the integer percent so a 16 KiB chunk per post does not flood the UI thread.
+            val pinBytes = Phase3Data.pinForDevice()?.bytes ?: -1L
+            var lastKey = -1
+            fun report(bytes: Long, total: Long) {
+                // Prefer the size the server promised (the 206 Content-Range total on a
+                // resumed fetch); fall back to the pinned deb size. One post per whole
+                // percent (per MB when the size is unknown), never one per 16 KiB chunk.
+                val full = if (total > 0) total else pinBytes
+                val key = if (full > 0) (100.0 * bytes / full).toInt().coerceIn(0, 100)
+                    else (bytes / (1 shl 20)).toInt()
+                if (key != lastKey) {
+                    lastKey = key
+                    statusCallback?.invoke(ProgressText.line("Downloading VS Code", bytes, full))
+                }
+            }
+            statusCallback?.invoke(ProgressText.line("Downloading VS Code", 0L, pinBytes))
+            try {
+                Phase3Data.fetch(context, progress = ::report)
+            } catch (t: Throwable) {
+                P7Log.say(context, "VSCODE fetch FAILED $t")
+                return Result(true, false, -1, android.os.SystemClock.elapsedRealtime() - t0)
+            }
+            if (!entry.isFile) {
+                P7Log.say(context, "VSCODE entry still missing after fetch — network incomplete?")
+                return Result(true, false, -1, android.os.SystemClock.elapsedRealtime() - t0)
+            }
+            P7Log.say(context, "VSCODE fetch done, entry present, starting code-server")
+            statusCallback?.invoke("Installing VS Code... (unpacking 120 MB)")
         }
         P7Log.say(context, "VSCODE starting code-server (wait up to $timeoutMs ms)")
         val session = Phase3Server.start(context, timeoutMs)

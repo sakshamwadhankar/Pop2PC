@@ -141,7 +141,7 @@ fn sample(cam: &Webcam, frames: u32, timeout_ms: u64) -> Result<(u32, Vec<f64>),
                 let pixels = cur as usize / 4;
                 let bytes = std::slice::from_raw_parts(ptr, pixels * 4);
                 let mut sum = 0u64;
-                for px in bytes.chunks_exact(4) {
+                for px in bytes.as_chunks::<4>().0 {
                     sum += u64::from(px[0]) + u64::from(px[1]) + u64::from(px[2]);
                 }
                 means.push(sum as f64 / (pixels as f64 * 3.0 * 255.0));

@@ -101,7 +101,8 @@ pub fn is_adb_triple(class: u8, subclass: u8, protocol: u8) -> bool {
 
 fn decode_utf16_z(buf: &[u8]) -> String {
     let units: Vec<u16> = buf
-        .chunks_exact(2)
+        .as_chunks::<2>().0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .take_while(|&u| u != 0)
         .collect();

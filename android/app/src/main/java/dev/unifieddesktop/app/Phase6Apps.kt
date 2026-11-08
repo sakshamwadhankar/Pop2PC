@@ -1244,9 +1244,12 @@ class BrowserView(context: Context, private val codeServer: Boolean = false) :
         Thread({
             // B3/Phase 12: the same guarded start is used by the optional desktop pre-warm,
             // so a click here cannot race a pre-warm into two code-server processes.
-            val r = CodeServerWarm.ensureRunning(context)
+            // T15-1: pass a status callback so the user sees download progress (fresh install).
+            val r = CodeServerWarm.ensureRunning(context) { msg ->
+                post { status.text = msg }
+            }
             if (!r.ok) {
-                post { status.text = "code-server did not start (see p3.log)" }
+                post { status.text = "VS Code setup failed — check your connection and try again" }
                 return@Thread
             }
             serverCookie = r.cookie

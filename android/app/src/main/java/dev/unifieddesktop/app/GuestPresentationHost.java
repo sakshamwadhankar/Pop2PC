@@ -766,8 +766,17 @@ final class GuestPresentationHost extends AppLifecycleCallback {
         return null;
     }
 
+    /** The PopToPC host package. Pure; the B-008 move-to-back guard must never
+     *  background the host's own phone UI, only a guest's placeholder task. */
+    static final String HOST_PACKAGE = "dev.unifieddesktop.app";
+
+    /** Pure unit-tested decision: is [packageName] the PopToPC host (vs a guest)? */
+    static boolean isHostPackage(String packageName) {
+        return HOST_PACKAGE.equals(packageName);
+    }
+
     private boolean isHostActivity(Activity activity) {
-        return "dev.unifieddesktop.app".equals(activity.getPackageName());
+        return isHostPackage(activity.getPackageName());
     }
 
     private static final class GuestPresentation extends Presentation {

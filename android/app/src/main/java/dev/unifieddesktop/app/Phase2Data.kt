@@ -152,8 +152,13 @@ object Phase2Data {
         return md.joinToString("") { "%02x".format(it) }
     }
 
-    private fun download(ctx: Context, url: String, sha: String, name: String): File =
-        download(downloadsDir(ctx), url, sha, name)
+    private fun download(
+        ctx: Context,
+        url: String,
+        sha: String,
+        name: String,
+        progress: ((Long, Long) -> Unit)? = null,
+    ): File = download(downloadsDir(ctx), url, sha, name, progress = progress)
 
     // ---------- B-133 residual: HTTP-Range resume (T14-3) ----------
     //
@@ -180,6 +185,15 @@ object Phase2Data {
         return h.removePrefix("bytes ").substringBefore('-').trim().toLongOrNull()
     }
 
+    /** Total size of a Content-Range header ("bytes 123-456/789" -> 789; a 416's
+     *  star-start form still names its total -> 100), else null when absent. Pure; the
+     *  progress line needs it so the user sees "x of y MB" during a resumed fetch. */
+    fun parseContentRangeTotal(header: String?): Long? {
+        val h = header?.trim() ?: return null
+        if (!h.startsWith("bytes ")) return null
+        return h.substringAfter('/', "").trim().toLongOrNull()
+    }
+
     /**
      * The offset to (re)start the body read at, given the bytes already on disk, the
      * response code and the echoed Content-Range start. Pure, unit-tested:
@@ -195,7 +209,7 @@ object Phase2Data {
     /** Resume attempts inside one download() call before giving up (each resumes; T14-2 saw 5 resets). */
     const val MAX_DL_ATTEMPTS = 30
 
-    private fun fetchInto(out: File, url: String, partial: Long, name: String, log: (String) -> Unit): Long {
+    private fun fetchInto(out: File, url: String, partial: Long, name: String, log: (String) -> Unit, progress: ((Long, Long) -> Unit)?): Long {
         var target = url
         var redirects = 0
         while (true) {
@@ -215,24 +229,57 @@ object Phase2Data {
                 continue
             }
             if (code >= 400) throw java.io.IOException("HTTP $code for $name")
-            val offset = resumeOffset(partial, code, parseContentRangeStart(conn.getHeaderField("Content-Range")))
+            val contentRange = conn.getHeaderField("Content-Range")
+            val offset = resumeOffset(partial, code, parseContentRangeStart(contentRange))
             val resume = code == 206 && offset == partial && partial > 0
+            // The full size, known before the body read so the progress line can say
+            // "x of y MB": the 206's Content-Range total, else offset + this body's length.
             val total: Long = if (resume) {
+                parseContentRangeTotal(contentRange)
+                    ?: conn.contentLengthLong.takeIf { it >= 0 }?.let { partial + it }
+                    ?: -1L
+            } else {
+                conn.contentLengthLong.takeIf { it >= 0 } ?: -1L
+            }
+            if (resume) {
                 log("DL $name resume offset=$offset (HTTP $code)")
                 conn.inputStream.use { src ->
-                    java.io.FileOutputStream(out, true).use { dst -> src.copyTo(dst, 1 shl 16) }
+                    java.io.FileOutputStream(out, true).use { dst ->
+                        pump(src, dst, partial, total, progress)
+                    }
                 }
-                // The 206's Content-Range total, when the server gave one.
-                conn.getHeaderField("Content-Range")?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
             } else {
                 if (partial > 0) log("DL $name ranges refused (HTTP $code) -> restart clean")
                 conn.inputStream.use { src ->
-                    java.io.FileOutputStream(out).use { dst -> src.copyTo(dst, 1 shl 16) }
+                    java.io.FileOutputStream(out).use { dst ->
+                        pump(src, dst, 0L, total, progress)
+                    }
                 }
-                conn.contentLengthLong.takeIf { it >= 0 } ?: -1L
             }
             conn.disconnect()
             return total
+        }
+    }
+
+    /** Copy [src] to [dst] in 16 KiB chunks, reporting bytes-so-far and the full size
+     *  ([total] < 0 when the server did not say) after each chunk. */
+    private fun pump(
+        src: java.io.InputStream,
+        dst: java.io.FileOutputStream,
+        start: Long,
+        total: Long,
+        progress: ((Long, Long) -> Unit)?,
+    ) {
+        val buf = ByteArray(1 shl 16)
+        var written = start
+        while (true) {
+            val n = src.read(buf)
+            if (n < 0) break
+            if (n > 0) {
+                dst.write(buf, 0, n)
+                written += n
+                progress?.invoke(written, total)
+            }
         }
     }
 
@@ -253,6 +300,7 @@ object Phase2Data {
         sha: String,
         name: String,
         log: (String) -> Unit = { say(it) },
+        progress: ((Long, Long) -> Unit)? = null,
     ): File {
         dir.mkdirs()
         val out = File(dir, name)
@@ -271,7 +319,7 @@ object Phase2Data {
             attempts++
             val partial = if (out.exists()) out.length() else 0L
             try {
-                val total = fetchInto(out, url, partial, name, log)
+                val total = fetchInto(out, url, partial, name, log, progress)
                 // A cut-off read does NOT always throw: on the desktop JVM an early EOF
                 // returns a short body normally (Android throws ProtocolException
                 // "unexpected end of stream", T14-2). A body shorter than the total the
@@ -682,10 +730,10 @@ object Phase2Data {
     internal fun fcStubIsEffective(isRegularFile: Boolean, currentSha256: String?): Boolean =
         isRegularFile && currentSha256 == FONTCONFIG_STUB_SHA256
 
-    fun fetchWine(ctx: Context) {
+    fun fetchWine(ctx: Context, progress: ((Long, Long) -> Unit)? = null) {
         val t0 = System.currentTimeMillis()
         val pin = winePin(ctx)   // round 3: switchable pin (default stays 11.19)
-        val tar = download(ctx, pin.url, pin.sha256, pin.url.substringAfterLast('/'))
+        val tar = download(ctx, pin.url, pin.sha256, pin.url.substringAfterLast('/'), progress = progress)
         val wineRoot = File(rootDir(ctx), "wine"); wineRoot.mkdirs()
         // every pin unpacks to its own top-level dir, so candidates coexist
         // (unpack output goes to <wineRoot>/<pin.dir>)
@@ -734,7 +782,7 @@ object Phase2Data {
      * 32 min), so one attempt per install click is not enough for a real user.
      */
     @Synchronized
-    fun ensureWineRuntime(ctx: Context): Boolean {
+    fun ensureWineRuntime(ctx: Context, progress: ((Long, Long) -> Unit)? = null): Boolean {
         val pin = winePin(ctx)
         val root = rootDir(ctx)
         val required = runtimeRequiredPaths(pin.dir, pin.loaderRel)
@@ -750,7 +798,7 @@ object Phase2Data {
             try {
                 fetchRuntime(ctx)
                 fetchBundle(ctx)
-                fetchWine(ctx)
+                fetchWine(ctx, progress)
                 val ok = runtimeRequiredPaths(pin.dir, pin.loaderRel).all { File(root, it).isFile }
                 say("RUNTIME_BOOTSTRAP ok=$ok attempt=$attempt ms=${System.currentTimeMillis() - t0}")
                 return ok
