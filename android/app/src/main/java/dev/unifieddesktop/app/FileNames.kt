@@ -22,4 +22,11 @@ object FileNames {
         while ("New folder $i" in existing) i++
         return "New folder $i"
     }
+
+    /** T15-3 Import: a basename only (no directories), control characters stripped. */
+    fun safe(name: String): String {
+        val base = name.substringAfterLast('/').substringAfterLast('\\')
+        val clean = base.filter { !it.isISOControl() }.trim()
+        return if (clean.isEmpty() || clean == "." || clean == "..") "file" else clean
+    }
 }

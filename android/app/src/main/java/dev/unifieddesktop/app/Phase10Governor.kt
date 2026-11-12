@@ -20,6 +20,10 @@ sealed class Phase10GovernorAction {
     data class SetFps(val fps: Int) : Phase10GovernorAction()
     data object LowerResolution : Phase10GovernorAction()
     data object WarnPc : Phase10GovernorAction()
+    /** Audit A-21: undo the D22 low-power step (full-size encoder rebuild + keyframe). */
+    data object RestoreResolution : Phase10GovernorAction()
+    /** Audit A-21: let minimized windows render again after a memory-pressure stop. */
+    data object ResumeHiddenWindows : Phase10GovernorAction()
 }
 
 data class Phase10GovernorInput(
@@ -28,6 +32,8 @@ data class Phase10GovernorInput(
     val memAvailableKb: Long,
     val thermalStatus: Int,
     val desktopVisible: Boolean,
+    /** Audit A-21: the plan fps the recovery ladder restores to (QualityPref). */
+    val planFps: Int = 60,
 )
 
 /**
@@ -61,6 +67,11 @@ object Phase10Governor {
     /** Android's THERMAL_STATUS_MODERATE. Kept numeric to keep this policy pure. */
     const val THERMAL_STATUS_MODERATE = 2
     const val MIN_AVAILABLE_KB = 256L * 1024L
+    /**
+     * Audit A-21: consecutive healthy samples (2 s each) before the ladder walks back one
+     * rung. 5 samples = 10 s of calm, so a passing thermal blip does not flap the encoder.
+     */
+    const val RECOVERY_STREAK = 5
 
     fun pressure(input: Phase10GovernorInput): String? {
         if (input.lowMemory) return "lowMemory=true"
@@ -121,4 +132,46 @@ object Phase10Governor {
             )
         }
     }
+
+    /**
+     * Audit A-21: the ladder used to stop at WARNED forever, so a session that had one hot
+     * spell stayed at 15 fps / 3/4 encoder size for the rest of the session. After
+     * [RECOVERY_STREAK] consecutive healthy samples the service calls this to undo exactly
+     * one rung; full quality returns over five calm samples (about 10 s), never in one jump.
+     * Null at NORMAL (nothing to undo).
+     */
+    fun recover(stage: Phase10GovernorStage, planFps: Int): Phase10GovernorDecision? =
+        when (stage) {
+            Phase10GovernorStage.WARNED -> Phase10GovernorDecision(
+                stage,
+                Phase10GovernorStage.LOW_RESOLUTION,
+                Phase10GovernorAction.RestoreResolution,
+                "recovery",
+            )
+            Phase10GovernorStage.LOW_RESOLUTION -> Phase10GovernorDecision(
+                stage,
+                Phase10GovernorStage.FPS_15,
+                Phase10GovernorAction.None,
+                "recovery",
+            )
+            Phase10GovernorStage.FPS_15 -> Phase10GovernorDecision(
+                stage,
+                Phase10GovernorStage.FPS_30,
+                Phase10GovernorAction.SetFps(30),
+                "recovery",
+            )
+            Phase10GovernorStage.FPS_30 -> Phase10GovernorDecision(
+                stage,
+                Phase10GovernorStage.HIDDEN_STOPPED,
+                Phase10GovernorAction.SetFps(planFps.coerceIn(15, 60)),
+                "recovery",
+            )
+            Phase10GovernorStage.HIDDEN_STOPPED -> Phase10GovernorDecision(
+                stage,
+                Phase10GovernorStage.NORMAL,
+                Phase10GovernorAction.ResumeHiddenWindows,
+                "recovery",
+            )
+            Phase10GovernorStage.NORMAL -> null
+        }
 }

@@ -189,6 +189,19 @@ class Phase5Encoder(
         MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES to 1,
     )
 
+    /**
+     * The optional set for one configure attempt. Audit A-18: intra-refresh joins the set
+     * only when the harness measured it ON (`p12ir:<mbs>`; 0 = off, the shipped default) so
+     * the proven ladder can never regress on phones that refuse the key — the existing
+     * drop ladder handles that refusal exactly as it handles B-056.
+     */
+    private fun optionalKeysFor(includeIntraRefresh: Boolean): Map<String, Int> {
+        if (!includeIntraRefresh) return optionalKeys
+        val m = LinkedHashMap(optionalKeys)
+        m[MediaFormat.KEY_INTRA_REFRESH_PERIOD] = Phase12Tuning.intraRefreshPeriod
+        return m
+    }
+
     /** Phase 12 A8/B2 only; dropped first if the codec rejects it (keeps the base set). */
     private fun p12Keys(): Map<String, Int> {
         val rows = Phase12Tuning.sliceRows
@@ -219,7 +232,9 @@ class Phase5Encoder(
             while (true) {
                 val fmt = baseFormat()
                 if (dropLevel < 2) {
-                    for ((k, v) in optionalKeys) setIntIfSupported(fmt, k, v)
+                    for ((k, v) in optionalKeysFor(includeIntraRefresh = true)) {
+                        setIntIfSupported(fmt, k, v)
+                    }
                 }
                 if (dropLevel == 0 && Phase12Tuning.lowLatencyEncoder) {
                     for ((k, v) in p12Keys()) setIntIfSupported(fmt, k, v)
@@ -314,6 +329,21 @@ class Phase5Encoder(
         Log.i(TAG, "target fps=$fps interval_ns=$targetFrameNs")
     }
 
+    /**
+     * Adaptive-bitrate hook (audit row 25): most hardware encoders accept a runtime bitrate
+     * change through PARAMETER_KEY_VIDEO_BITRATE, so the ABR policy never has to rebuild the
+     * codec. Silent no-op when the encoder refuses (the governor ladder stays the fallback).
+     */
+    fun setTargetBitrate(bitsPerSecond: Int) {
+        try {
+            codec?.setParameters(
+                Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitsPerSecond) }
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "runtime bitrate change refused: $t")
+        }
+    }
+
     fun stats(): String =
         "frames=${seq.get()} draws=${drawCount.get()} keyreq=${keyframeRequests.get()} dropped=$droppedFrames"
 
@@ -385,6 +415,18 @@ class Phase5Encoder(
             // The display always renders at the capture size. When the encoder is smaller,
             // drawFrame's viewport scales this whole texture down (D22).
             st.setDefaultBufferSize(captureWidth, captureHeight)
+            // Audit A-17: fixed GL state, issued once instead of per frame. drawFrame only
+            // updates the texture matrix and draws.
+            GLES20.glViewport(0, 0, width, height)
+            GLES20.glUseProgram(program)
+            vertexBuf.position(0)
+            GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, vertexBuf)
+            GLES20.glEnableVertexAttribArray(aPos)
+            texBuf.position(0)
+            GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, texBuf)
+            GLES20.glEnableVertexAttribArray(aTex)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
             st.setOnFrameAvailableListener({
                 framesPending.incrementAndGet()
                 glHandler?.post {
@@ -464,17 +506,10 @@ class Phase5Encoder(
                 return
             }
             if (eglSurface == EGL14.EGL_NO_SURFACE) return
-            GLES20.glViewport(0, 0, width, height)
-            GLES20.glUseProgram(program)
-            vertexBuf.position(0)
-            GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, vertexBuf)
-            GLES20.glEnableVertexAttribArray(aPos)
-            texBuf.position(0)
-            GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, texBuf)
-            GLES20.glEnableVertexAttribArray(aTex)
+            // Audit A-17: the GL program, viewport, attribute pointers and texture binding
+            // never change for this encoder's lifetime; they are set once in glInitAndLoop.
+            // Only the texture matrix differs per frame.
             GLES20.glUniformMatrix4fv(uST, 1, false, stMatrix, 0)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, nowNs)
             if (!EGL14.eglSwapBuffers(eglDisplay, eglSurface)) {
@@ -484,7 +519,11 @@ class Phase5Encoder(
             lastDrawNs = nowNs
             // Phase 12 round 4 diagnosis: one line per GL draw, so the timeline of a key frame
             // (view draw -> GL swap -> encoder output) can be read straight from logcat.
-            Log.i(TAG, "P5PROBE draw now=${nowNs / 1000} pend=$pending force=$force ts=${st.timestamp / 1000}")
+            // Audit B-139b: this ran on the GL thread at up to 60 fps; release builds skip it
+            // (debug keeps the timeline for the latency-probe work).
+            if (BuildConfig.DEBUG) {
+                Log.i(TAG, "P5PROBE draw now=${nowNs / 1000} pend=$pending force=$force ts=${st.timestamp / 1000}")
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "draw failed", t)
         }
@@ -548,10 +587,14 @@ class Phase5Encoder(
                             }
                         }
                         val mySeq = seq.incrementAndGet()
-                        Log.i(
-                            TAG,
-                            "P5PROBE out seq=$mySeq pts=${info.presentationTimeUs} now=${System.nanoTime() / 1000} key=$isKey",
-                        )
+                        // Audit B-139b: one logcat line per encoded access unit (up to 60/s) on
+                        // the output thread; debug builds keep the timeline.
+                        if (BuildConfig.DEBUG) {
+                            Log.i(
+                                TAG,
+                                "P5PROBE out seq=$mySeq pts=${info.presentationTimeUs} now=${System.nanoTime() / 1000} key=$isKey",
+                            )
+                        }
                         listener.onAccessUnit(
                             if (isKey) Phase5Protocol.VFLAG_KEYFRAME else 0,
                             mySeq, info.presentationTimeUs, System.nanoTime(), au
@@ -589,23 +632,42 @@ class Phase5Encoder(
      * MediaCodec gives Annex-B on most devices once PREPEND_HEADER is on, but some
      * Qualcomm builds still emit AVCC (4-byte length prefixes). Normalise: if the first
      * bytes are a start code keep them, otherwise convert every length-prefixed NALU.
+     *
+     * Audit A-19: the conversion reuses one grow-only scratch buffer instead of a
+     * ByteArrayOutputStream plus a 4-byte array per NAL unit per frame. The result is
+     * copied once into an exact-size array: [outputLoop] consumes it synchronously (the
+     * wire packer makes its own copy), and outputLoop is the only caller, so reuse is safe.
      */
+    private var annexBScratch: ByteArray = ByteArray(0)
+
     private fun toAnnexB(data: ByteArray): ByteArray {
         if (data.size >= 4 && data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 0.toByte() && data[3] == 1.toByte()) {
             return data
         }
-        val out = java.io.ByteArrayOutputStream()
+        var out = annexBScratch
+        if (out.size < data.size + 16) {
+            out = ByteArray(maxOf(data.size + 16, out.size * 2))
+            annexBScratch = out
+        }
+        var w = 0
         var i = 0
         var converted = false
         while (i + 4 <= data.size) {
             val len = ((data[i].toInt() and 0xFF) shl 24) or ((data[i + 1].toInt() and 0xFF) shl 16) or
                 ((data[i + 2].toInt() and 0xFF) shl 8) or (data[i + 3].toInt() and 0xFF)
             if (len <= 0 || i + 4 + len > data.size) { converted = false; break }
-            out.write(byteArrayOf(0, 0, 0, 1))
-            out.write(data, i + 4, len)
+            if (w + 4 + len > out.size) {
+                val bigger = ByteArray(maxOf(w + 4 + len, out.size * 2))
+                System.arraycopy(out, 0, bigger, 0, w)
+                out = bigger
+                annexBScratch = bigger
+            }
+            out[w] = 0; out[w + 1] = 0; out[w + 2] = 0; out[w + 3] = 1
+            System.arraycopy(data, i + 4, out, w + 4, len)
+            w += 4 + len
             i += 4 + len
             converted = true
         }
-        return if (converted && i == data.size) out.toByteArray() else data
+        return if (converted && i == data.size) ByteArray(w).also { System.arraycopy(out, 0, it, 0, w) } else data
     }
 }

@@ -348,6 +348,10 @@ mod wasapi {
                         out[f * d.channels as usize + ch] = f32::from(v) / 32768.0;
                     }
                 }
+            } else if d.channels == 2 && samples.len() >= n as usize * 2 {
+                // Audit: stereo->stereo i16 is a straight copy, not a per-sample walk.
+                let out = std::slice::from_raw_parts_mut(p as *mut i16, n as usize * 2);
+                out.copy_from_slice(&samples[..n as usize * 2]);
             } else {
                 let out = std::slice::from_raw_parts_mut(p as *mut i16, n as usize * d.channels as usize);
                 for f in 0..n as usize {
@@ -532,11 +536,12 @@ mod wasapi {
             }
         }
 
-        /// Render-side cushion kept full: 20 ms. The jitter buffer is the real buffer; a
-        /// 1 s WASAPI buffer previously swallowed it whole and made the underrun counter
-        /// measure queue emptiness, not audible gaps (B-101, round 3).
+        /// Render-side cushion kept full: 60 ms (DEVICE_TOPUP_FRAMES = 2880 / 48 kHz; the
+        /// old "20 ms" wording was stale — audit docs-truth fix). The jitter buffer is the
+        /// real buffer; a 1 s WASAPI buffer previously swallowed it whole and made the
+        /// underrun counter measure queue emptiness, not audible gaps (B-101, round 3).
         /// Write whole 10 ms packets the device has room for, but only top the device up
-        /// to 20 ms; the jitter buffer keeps the 60 ms that covers the bursty link.
+        /// to 60 ms; the jitter buffer keeps the 60 ms that covers the bursty link.
         pub fn pump(&mut self) -> Result<u32, String> {
             let mut total = 0u32;
             loop {

@@ -2928,12 +2928,31 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let session = Session::acquire().expect("test could not acquire the mutex");
+            // B-107: the named mutex is visible across the whole logon session, so under
+            // parallel test load another test (or a stray udreceiver) can hold it for a
+            // moment. Retry instead of failing this test on one collision; if nothing
+            // frees it within 5 s the test is genuinely blocked and should fail loudly.
+            let mut last_err = String::new();
+            let mut session = None;
+            for _ in 0..50 {
+                match Session::acquire() {
+                    Ok(s) => {
+                        session = Some(s);
+                        break;
+                    }
+                    Err(e) => last_err = e,
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let session = session
+                .unwrap_or_else(|| panic!("test could not acquire the mutex in 5 s: {last_err}"));
             ready_tx.send(()).unwrap();
             let _ = release_rx.recv();
             drop(session);
         });
-        ready_rx.recv().unwrap();
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("holder thread never signalled ready (B-107 guard)");
 
         let old = std::env::var_os("UD_LOCK_DIR");
         std::env::set_var("UD_LOCK_DIR", &dir);

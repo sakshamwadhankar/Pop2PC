@@ -431,12 +431,13 @@ object Phase2Data {
         name: String,
         log: (String) -> Unit = { say(it) },
         progress: ((Long, Long) -> Unit)? = null,
+        verifySha: Boolean = true,
     ): File {
         dir.mkdirs()
         val out = File(dir, name)
         if (out.exists() && out.length() > 0) {
             val got = sha256(out)
-            if (got == sha) { log("DL $name cached sha ok"); return out }
+            if (verifySha && got == sha) { log("DL $name cached sha ok"); return out }
             // B-133 residual: keep the partial - the fetch below resumes it when the
             // server honours Range; it is truncated only when the server refuses.
             log("DL $name cached sha MISMATCH (${out.length()} B on disk) -> resume/restart")
@@ -476,9 +477,22 @@ object Phase2Data {
         val got = sha256(out)
         val ms = System.currentTimeMillis() - t
         log("DL $name bytes=${out.length()} ms=$ms sha=$got attempts=$attempts")
-        check(got == sha) { "sha mismatch for $url: got $got want $sha" }
+        if (verifySha) check(got == sha) { "sha mismatch for $url: got $got want $sha" }
         return out
     }
+
+    /**
+     * T15-3 Import: fetch a user-chosen URL into [dir] as [name] with no pinned SHA-256 (the
+     * import list records the sha of whatever arrived). Same Range/resume path as [download];
+     * only the final pin check is skipped, because the caller has no pin to check against.
+     */
+    internal fun downloadAny(
+        dir: File,
+        url: String,
+        name: String,
+        log: (String) -> Unit = { say(it) },
+        progress: ((Long, Long) -> Unit)? = null,
+    ): File = download(dir, url, sha = "", name = name, log = log, progress = progress, verifySha = false)
 
     // ---------- minimal tar reader (deb data.tar.{xz,gz} + root-level tarballs) ---
 

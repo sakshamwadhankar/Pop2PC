@@ -296,6 +296,8 @@ class ShellRoot(
         }
         startMenu.onLaunch = { app -> openApp(app); closeStartMenu() }
         startMenu.onLaunchInstalled = { id -> openCatalogApp(id); closeStartMenu() }
+        startMenu.onLaunchImported = { entry -> launchImported(entry); closeStartMenu() }
+        startMenu.onLaunchWindows = { lnk -> launchShortcut(lnk); closeStartMenu() }
         SettingsDispatch.onWallpaperPick = { i -> setWallpaper(i) }
     }
 
@@ -819,6 +821,96 @@ class ShellRoot(
     /** Rebuild the installed section from the records (after an install or uninstall). */
     fun refreshInstalledRows() {
         startMenu.setInstalledRows(InstalledMenu.rows(Installed.read(context), catalog))
+        // T15-3: the imported apps live in their own list (files/desktop/Imported + JSON), so
+        // a restart or a new link only has to re-read them.
+        startMenu.setImportedRows(ImportedApps.read(context))
+        // T15-3: shortcuts an MSI installer created are read fresh from the prefix, so an
+        // install the user just clicked through shows up the next time the menu opens.
+        startMenu.setWindowsRows(Phase2Wine.startMenuShortcuts(context))
+    }
+
+    /**
+     * T15-3: run a Windows shortcut created by an installed MSI (start.exe /unix resolves the
+     * .lnk through Wine's shell, exactly like double-clicking it on Windows).
+     */
+    fun launchShortcut(lnk: java.io.File): String {
+        if (!lnk.isFile) {
+            toast("${lnk.name}: the shortcut is gone")
+            return "missing ${lnk.path}"
+        }
+        openApp(App.X11, title = X11Title.exeTitle(lnk.nameWithoutExtension))
+        Thread {
+            try {
+                val ok = Phase2Wine.runShortcut(context, lnk)
+                P7Log.say(context, "IMPORT shortcut ${lnk.name} started=$ok")
+            } catch (t: Throwable) {
+                P7Log.say(context, "IMPORT shortcut ${lnk.name} fail: $t")
+            }
+        }.start()
+        return "starting ${lnk.nameWithoutExtension}"
+    }
+
+    /**
+     * T15-3: run an import from its start-menu row. A portable exe (or the exe found in an
+     * imported zip) starts under the shipped Wine loader in the X11 window; an msi starts
+     * msiexec with its normal UI on that window so the user clicks through it. A row that
+     * cannot run honestly says so - nothing is auto-run.
+     */
+    fun launchImported(entry: ImportedApps.ImportedApp): String {
+        val file = java.io.File(context.filesDir, entry.file)
+        val plan = ImportedApps.launchFor(entry)
+        return when (plan) {
+            ImportedApps.Launch.EXE, ImportedApps.Launch.ZIP_EXE -> {
+                val exe = if (plan == ImportedApps.Launch.ZIP_EXE) {
+                    java.io.File(context.filesDir, entry.exe)
+                } else file
+                if (!exe.isFile) {
+                    toast("${entry.name}: the staged file is missing")
+                    return "missing ${exe.path}"
+                }
+                val title = X11Title.exeTitle(exe.name)
+                openApp(App.X11, title = title)
+                Thread {
+                    try {
+                        if (!Phase2Wine.ensureLivePrefix(context, "import ${entry.name}")) {
+                            P7Log.say(context, "IMPORT launch ${entry.name}: Wine prefix not ready")
+                            return@Thread
+                        }
+                        val ok = Phase2Wine.openExe(context, exe.absolutePath)
+                        P7Log.say(context, "IMPORT launch ${entry.name} ok=$ok exe=${exe.name}")
+                    } catch (t: Throwable) {
+                        P7Log.say(context, "IMPORT launch ${entry.name} fail: $t")
+                    }
+                }.start()
+                "starting ${entry.name}"
+            }
+            ImportedApps.Launch.MSI -> {
+                if (!file.isFile) {
+                    toast("${entry.name}: the staged installer is missing")
+                    return "missing ${file.path}"
+                }
+                openApp(App.X11, title = "Installer - ${entry.name}")
+                Thread {
+                    try {
+                        val ok = Phase2Wine.runMsiInteractive(context, file)
+                        P7Log.say(context, "IMPORT installer ${entry.name} started=$ok")
+                        if (ok) {
+                            // Give the installer a moment to write its shortcuts, then let the
+                            // next start-menu open list them.
+                            Thread.sleep(2_000)
+                            post { refreshInstalledRows() }
+                        }
+                    } catch (t: Throwable) {
+                        P7Log.say(context, "IMPORT installer ${entry.name} fail: $t")
+                    }
+                }.start()
+                "installer started: ${entry.name}"
+            }
+            ImportedApps.Launch.UNSUPPORTED -> {
+                toast("${entry.name}: this file type cannot run yet")
+                "unsupported ${entry.name}"
+            }
+        }
     }
 
     /** Harness: every start-menu row, fixed entries first. */
@@ -836,10 +928,10 @@ class ShellRoot(
         // the taskbar.
         val workH = desktopH - TASKBAR_H
         val menuH = minOf(startMenu.preferredHeight(), (workH * 0.70f).toInt())
-        startMenu.layoutParams = LayoutParams(560, menuH).apply {
+        startMenu.layoutParams = LayoutParams(StartMenuLayout.PANEL_W, menuH).apply {
             gravity = Gravity.BOTTOM or Gravity.START
-            leftMargin = 8
-            bottomMargin = TASKBAR_H + 8
+            leftMargin = StartMenuLayout.EDGE
+            bottomMargin = TASKBAR_H + StartMenuLayout.EDGE
         }
         startMenu.bringToFront()
         cursorView.bringToFront()
@@ -857,6 +949,13 @@ class ShellRoot(
 
     /** Governor step one: ensure minimized windows are detached from the render path. */
     fun stopRenderingHiddenWindows(): Int {
+        val hidden = model.all().count { it.minimized }
+        if (hidden > 0) syncViews()
+        return hidden
+    }
+
+    /** Governor recovery (audit A-21): let minimized windows render again after a pressure stop. */
+    fun resumeHiddenWindows(): Int {
         val hidden = model.all().count { it.minimized }
         if (hidden > 0) syncViews()
         return hidden
@@ -943,9 +1042,17 @@ class ShellRoot(
             heldButtons.add(button)
             buttonsAllTime++
         } else heldButtons.remove(button)
-        if (buttonLogs++ < 30) {
+        // T15-3 B-139 diagnostic: log every click with the menu rect, so a wrong hit target is
+        // visible in the log instead of guessed from screenshots. Audit B-139b: this built a
+        // string and hit the filesystem for EVERY click on the UI thread; debug builds keep
+        // it, release builds skip it entirely.
+        buttonLogs++
+        if (BuildConfig.DEBUG) {
             P7Log.say(context, "P7SHELL button=$button down=$down at=$x,$y " +
-                "under=${model.windowAt(x, y)?.title ?: "desktop"} focus=${model.focusedId ?: -1}")
+                "under=${model.windowAt(x, y)?.title ?: "desktop"} focus=${model.focusedId ?: -1} " +
+                "menu=${startMenu.left},${startMenu.top},${startMenu.right},${startMenu.bottom}" +
+                " vis=${if (startMenu.visibility == View.VISIBLE) 1 else 0} " +
+                "taskbarTop=${taskbar.top} root=${width}x$height density=${resources.displayMetrics.density}")
         }
         moveTo(x, y)
         if (button == Phase5Protocol.BTN_RIGHT) {
@@ -1028,6 +1135,14 @@ class ShellRoot(
     /** Wheel over the desktop: scroll whatever is under the pointer (the shell itself). */
     fun wheel(delta: Int, x: Int, y: Int) {
         moveTo(x, y)
+        // T15-3: the start menu's list scrolls with the PC wheel while the pointer is over the
+        // panel, so the Imported / Windows programs sections are reachable without a keyboard.
+        if (startMenuOpen() && x >= startMenu.left && x < startMenu.right &&
+            y >= startMenu.top && y < startMenu.bottom) {
+            startMenu.scrollList(delta)
+            invalidate()
+            return
+        }
         frameUnder(x, y)?.wheel(delta, x, y)
         invalidate()
     }
@@ -1132,5 +1247,9 @@ class ShellRoot(
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         super.onLayout(changed, l, t, r, b)
         cursorView.setCursor(cursorX, cursorY)
+        if (changed) {
+            P7Log.say(context, "P6SHELL layout ${width}x$height density=${resources.displayMetrics.density} " +
+                "dpi=${resources.displayMetrics.densityDpi} model=${desktopW}x$desktopH")
+        }
     }
 }

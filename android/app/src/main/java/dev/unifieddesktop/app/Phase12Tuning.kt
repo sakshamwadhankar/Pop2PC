@@ -33,6 +33,25 @@ object Phase12Tuning {
     @Volatile var sliceRows = 4
         private set
 
+    /**
+     * Audit A-18: intra-refresh probe. `KEY_INTRA_REFRESH_PERIOD` spreads an I-frame's cost
+     * over many frames so one keyframe never lands whole in a frame. OFF by default: some
+     * encoders list keys they then reject (B-056), and it is applied through the encoder's
+     * optional-key drop ladder, so turning it on must be an A/B measurement on the phone
+     * (harness `p12ir:<period-mbs>`, 0 = off), never a silent default.
+     */
+    @Volatile var intraRefreshPeriod = 0
+        private set
+
+    /**
+     * T15-4 item 3: the adaptive-bitrate switch (audit row 25). Default ON - the policy
+     * only reacts to the PC's measured `vq` stats and never exceeds the plan ceiling.
+     * The live A/B (BEFORE/AFTER typing tables per rule zero) uses `p12abr:0|1`; if the
+     * AFTER table is worse, the manager compares and the default flips.
+     */
+    @Volatile var abrOn = true // T15-4 item 3: shipped default; the live A/B tables are the manager gate
+        private set
+
     /** Delay of the first input redraw; 8 ms lets the view draw the flash first. */
     @Volatile var inputRedrawDelayMs = 8
         private set
@@ -64,6 +83,21 @@ object Phase12Tuning {
         if (p !in 0..3) return false
         setProfile(p)
         return true
+    }
+
+    /**
+     * Audit A-18: set the intra-refresh period in macroblocks per frame, or 0 to leave the
+     * key out entirely (the default). Returns true when the value was accepted.
+     */
+    fun setIntraRefresh(periodMacroblocks: Int): Boolean {
+        if (periodMacroblocks !in 0..100_000) return false
+        intraRefreshPeriod = periodMacroblocks
+        return true
+    }
+
+    /** T15-4 item 3: ABR on/off for the rule-zero A/B (`p12abr:0|1`). */
+    fun setAbr(on: Boolean) {
+        abrOn = on
     }
 
     private fun apply(encoder: Boolean, rows: Int, delayMs: Int, twice: Boolean) {

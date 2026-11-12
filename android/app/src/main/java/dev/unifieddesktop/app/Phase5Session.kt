@@ -83,6 +83,12 @@ class Phase5Session(
     /** The encoder plan in use; the governor halves these instead of the build constants. */
     @Volatile private var activeBitrate = QualityPlan.DEFAULT_BITRATE
     @Volatile private var activeFps = QualityPlan.DEFAULT_FPS
+    /** The quality plan's ceiling; ABR never steps above it (audit row 25). */
+    @Volatile private var planBitrate = QualityPlan.DEFAULT_BITRATE
+    /** Adaptive-bitrate state; fed by the PC's per-second `vq` stats (audit row 25). */
+    private var abrState = Phase5Abr.State(QualityPlan.DEFAULT_BITRATE)
+    /** 1-in-10 log throttle while ABR is switched off for the A/B. */
+    private var abrLoggedOff = 0
 
     @Volatile private var dropping = false
     @Volatile private var lastKeyframeRequestMs = 0L
@@ -129,6 +135,8 @@ class Phase5Session(
         val plan = QualityPref.plan(service)
         activeBitrate = plan.bitrate
         activeFps = plan.fps
+        planBitrate = plan.bitrate
+        abrState = Phase5Abr.State(plan.bitrate)
         say("P5 quality=${plan.label} ${plan.bitrate / 1_000_000}Mbps ${plan.fps}fps (desktop ${wantedW}x$wantedH)")
         val enc = Phase5Encoder(
             wantedW, wantedH, encoderListener(),
@@ -210,7 +218,7 @@ class Phase5Session(
             }
             say("P5PROBE flash listener wired (desktop up)")
         }
-        say("P5 desktop up ${Phase5Desktop.W}x${Phase5Desktop.H} encoder=${enc.codecName} context=${if (resumed == null) "service" else "activity-or-service"} ($why)")
+        say("P5 desktop up ${wantedW}x$wantedH encoder=${enc.codecName} context=${if (resumed == null) "service" else "activity-or-service"} ($why)")
         Phase5Dispatch.bind(this)
         // a first keyframe so the PC can start decoding at once
         main.postDelayed({ enc.redrawNow(); enc.requestKeyframe() }, 300)
@@ -273,23 +281,74 @@ class Phase5Session(
         val lowBitrate = (activeBitrate / 2).coerceAtLeast(2_000_000)
         val lowFps = (activeFps / 2).coerceAtLeast(15)
         say("P5 governor low-power begin ${dw}x$dh -> ${lowW}x$lowH (${lowBitrate / 1_000_000}Mbps, $lowFps fps)")
+        val err = swapEncoder(old, d, lowW, lowH, lowBitrate, lowFps, dw, dh)
+        if (err != null) return err
+        displayScale.set(75)
+        activeBitrate = lowBitrate
+        activeFps = lowFps
+        abrState = Phase5Abr.State(lowBitrate)
+        return "applied low-power ${lowW}x${lowH} at $lowFps fps (desktop ${dw}x$dh kept)"
+    }
+
+    /**
+     * Audit A-21: undo the D22 low-power step. The recovery ladder calls this after the
+     * phone has been calm for 10 s: the encoder rebuilds at the full desktop size and the
+     * plan bitrate (pacing stays at the current stage's fps; later recovery rungs raise
+     * it), followed by a keyframe so the PC gets the new, larger sequence cleanly.
+     */
+    fun governorRestoreResolution(): String {
+        val old = encoder ?: return "no live encoder"
+        val d = desktop ?: return "no live desktop"
+        if (displayScale.get() >= 100) {
+            say("P5 governor restore-resolution already full")
+            return "already full"
+        }
+        val (dw, dh) = d.size()
+        val restoreFps = QualityPref.plan(service).fps
+        say("P5 governor restore begin -> ${dw}x$dh (${planBitrate / 1_000_000}Mbps, pacing ${activeFps} fps)")
+        val err = swapEncoder(old, d, dw, dh, planBitrate, restoreFps, dw, dh)
+        if (err != null) return err
+        displayScale.set(100)
+        activeBitrate = planBitrate
+        abrState = Phase5Abr.State(planBitrate)
+        // Keep the current stage's pacing (the ladder raises fps on later recovery rungs).
+        old.setTargetFps(activeFps)
+        return "restored full ${dw}x$dh at plan bitrate (${activeFps} fps pacing kept)"
+    }
+
+    /**
+     * One encoder swap used by both governor directions: prepare [next], rebind the live
+     * desktop onto its capture surface, adopt it, stop [old], keyframe. Returns null on
+     * success or a plain failure reason (the caller restores nothing on failure — the old
+     * encoder keeps running when the rebind falls back).
+     */
+    private fun swapEncoder(
+        old: Phase5Encoder,
+        d: Phase5Desktop,
+        w: Int,
+        h: Int,
+        bitrate: Int,
+        fps: Int,
+        captureW: Int,
+        captureH: Int,
+    ): String? {
         val startSeq = old.stats().substringAfter("frames=").substringBefore(' ').toIntOrNull() ?: 0
         val next = Phase5Encoder(
-            lowW, lowH, encoderListener(),
-            bitrate = lowBitrate,
-            fps = lowFps,
+            w, h, encoderListener(),
+            bitrate = bitrate,
+            fps = fps,
             initialSeq = startSeq,
-            captureWidth = dw,
-            captureHeight = dh,
+            captureWidth = captureW,
+            captureHeight = captureH,
         )
         if (!next.prepare()) {
-            say("P5 governor low-power FAILED: encoder prepare")
+            say("P5 governor swap FAILED: encoder prepare")
             next.stop()
             return "encoder prepare failed"
         }
         val st = next.surfaceTexture
         if (st == null) {
-            say("P5 governor low-power FAILED: no input surface")
+            say("P5 governor swap FAILED: no input surface")
             next.stop()
             return "no input surface"
         }
@@ -304,26 +363,23 @@ class Phase5Session(
                 if (!bound && oldSt != null) d.rebindSurface(android.view.Surface(oldSt))
                 ok.set(bound)
             } catch (t: Throwable) {
-                say("P5 governor low-power swap threw ${t.javaClass.simpleName}: ${t.message}")
+                say("P5 governor swap threw ${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 latch.countDown()
             }
         }
         latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
         if (!ok.get()) {
-            say("P5 governor low-power FAILED: surface swap")
+            say("P5 governor swap FAILED: surface swap")
             next.stop()
             return "surface swap failed"
         }
         encoder = next
-        displayScale.set(75)
-        activeBitrate = lowBitrate
-        activeFps = lowFps
         old.stop()
         Phase5Dispatch.bind(this)
         main.postDelayed({ next.redrawNow(); next.requestKeyframe() }, 300)
-        say("P5 governor low-power applied ${dw}x$dh -> ${lowW}x$lowH at $lowFps fps (desktop kept)")
-        return "applied low-power ${lowW}x${lowH} at $lowFps fps (desktop ${dw}x$dh kept)"
+        say("P5 governor swap applied -> ${w}x$h at $fps fps (desktop ${captureW}x$captureH kept)")
+        return null
     }
 
     /** Shared by the initial encoder and the governor's lower-resolution rebuild. */
@@ -470,7 +526,9 @@ class Phase5Session(
                     if (e.down) {
                         val pr = Probe(e.tPcUs, tRecvUs)
                         probe.set(pr)
-                        say("P5PROBE keydown vk=${e.vk} probe armed")
+                        // Audit B-139b: this ran (logcat + file append) on the session thread
+                        // for every keystroke; debug builds keep the probe timeline.
+                        if (BuildConfig.DEBUG) say("P5PROBE keydown vk=${e.vk} probe armed")
                         main.post {
                             pr.tDispatchUs = System.nanoTime() / 1000
                             val handled = desktop?.key(true, Phase5Protocol.vkToKeycode(e.vk), e.scan, Phase5Protocol.modsToMetaState(e.mods)) ?: false
@@ -488,8 +546,10 @@ class Phase5Session(
                     } else {
                         main.post {
                             desktop?.key(false, Phase5Protocol.vkToKeycode(e.vk), e.scan, Phase5Protocol.modsToMetaState(e.mods))
-                            val txt = desktop?.inputText() ?: ""
-                            say("P5 keyup vk=${e.vk} text=\"${txt.replace("\n", "\\n").take(80)}\"")
+                            // Audit B-139b + privacy: the keyup line used to log the typed
+                            // TEXT. Content never goes to the log again; debug builds get
+                            // the vk only.
+                            if (BuildConfig.DEBUG) say("P5 keyup vk=${e.vk}")
                         }
                     }
                 }
@@ -572,7 +632,29 @@ class Phase5Session(
                     say("P5 display requested ${w}x$h")
                 }
             }
-            is Phase5Protocol.Control.PcVideoStats -> say("P5 PCVID ${c.text}")
+            is Phase5Protocol.Control.PcVideoStats -> {
+                // Audit row 25 / T15-4 item 3 (adaptive bitrate): the PC's per-second video
+                // stats feed the encoder bitrate instead of only being logged. Pure policy
+                // in Phase5Abr; the change is a runtime MediaCodec parameter (no rebuild),
+                // and every down-step requests a keyframe so the decoder resyncs after a
+                // stall. `p12abr:0` disables it for the rule-zero A/B.
+                val s = Phase5Abr.parseVq(c.text)
+                if (s == null) {
+                    say("P5 PCVID ${c.text.take(60)}")
+                } else if (!Phase12Tuning.abrOn) {
+                    if (abrLoggedOff++ % 10 == 0) say("P5 ABR off (p12abr:0) pcFps=${"%.1f".format(s.fps)} dropped=${s.dropped}")
+                } else {
+                    val now = SystemClock.elapsedRealtime()
+                    val (next, d) = Phase5Abr.step(abrState, now, s, planBitrate, activeFps.toDouble())
+                    abrState = next
+                    if (d is Phase5Abr.Decision.Set) {
+                        activeBitrate = d.bitrate
+                        encoder?.setTargetBitrate(d.bitrate)
+                        if (d.keyframe) requestKeyframe("abr drop to ${d.bitrate}")
+                        say("P5 ABR -> ${d.bitrate / 1_000_000} Mbps kf=${d.keyframe} (pcFps=${"%.1f".format(s.fps)} dropped=${s.dropped})")
+                    }
+                }
+            }
             is Phase5Protocol.Control.Unknown -> say("P5 control unknown \"${c.text.take(40)}\"")
         }
     }

@@ -1,10 +1,12 @@
 //! Phase 11 D-d: file transfer over CH_FILE. One logical message per 64 KiB wire frame
 //! (no MORE_FOLLOWS assembly needed on the phone):
-//!   START: [1][u32 id][u64 size][u16 name_len][name][32-byte SHA-256]
+//!   START: [1][u32 id][u64 size][u16 name_len][name][32-byte SHA-256][u8 kind]
 //!   DATA:  [2][u32 id][bytes]           (at most 65528 data bytes)
 //!   END:   [3][u32 id]
-//! The receiver streams into a `.part` file, verifies the SHA-256, then renames to a name
-//! that never overwrites (it adds " (2)"). Names are reduced to a basename.
+//! The kind byte is the T15-3 import flag (0 = ordinary file, 1 = imported app); a START
+//! without it reads as kind 0, so phone -> PC transfers are unchanged. The receiver streams
+//! into a `.part` file, verifies the SHA-256, then renames to a name that never overwrites
+//! (it adds " (2)"). Names are reduced to a basename.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -13,15 +15,20 @@ use std::path::{Path, PathBuf};
 /// One DATA frame stays inside the 64 KiB wire cap (8-byte header + 8-byte file header left).
 pub const MAX_DATA: usize = 65536 - 8;
 
-pub fn encode_start(id: u32, size: u64, name: &str, sha: &[u8; 32]) -> Vec<u8> {
+/// START kind: an ordinary file (a drag-and-drop) or an app the user imported.
+pub const KIND_FILE: u8 = 0;
+pub const KIND_IMPORT: u8 = 1;
+
+pub fn encode_start(id: u32, size: u64, name: &str, sha: &[u8; 32], kind: u8) -> Vec<u8> {
     let n = name.as_bytes();
-    let mut v = Vec::with_capacity(1 + 4 + 8 + 2 + n.len() + 32);
+    let mut v = Vec::with_capacity(1 + 4 + 8 + 2 + n.len() + 32 + 1);
     v.push(1);
     v.extend_from_slice(&id.to_be_bytes());
     v.extend_from_slice(&size.to_be_bytes());
     v.extend_from_slice(&(n.len() as u16).to_be_bytes());
     v.extend_from_slice(n);
     v.extend_from_slice(sha);
+    v.push(kind);
     v
 }
 
@@ -41,7 +48,7 @@ pub fn encode_end(id: u32) -> Vec<u8> {
 }
 
 pub enum FileMsg<'a> {
-    Start { id: u32, size: u64, name: String, sha: [u8; 32] },
+    Start { id: u32, size: u64, name: String, sha: [u8; 32], kind: u8 },
     Data { id: u32, data: &'a [u8] },
     End { id: u32 },
 }
@@ -65,7 +72,9 @@ pub fn parse(msg: &[u8]) -> Result<FileMsg<'_>, String> {
             let name = String::from_utf8_lossy(&msg[15..15 + nl]).to_string();
             let mut sha = [0u8; 32];
             sha.copy_from_slice(&msg[15 + nl..end]);
-            Ok(FileMsg::Start { id, size, name, sha })
+            // T15-3: the optional kind byte; an older START (phone -> PC) reads as 0.
+            let kind = msg.get(end).copied().unwrap_or(KIND_FILE);
+            Ok(FileMsg::Start { id, size, name, sha, kind })
         }
         2 => Ok(FileMsg::Data { id, data: &msg[5..] }),
         3 => Ok(FileMsg::End { id }),
@@ -107,6 +116,9 @@ pub struct Received {
     pub path: PathBuf,
     pub bytes: u64,
     pub sha_ok: bool,
+    /// The START kind (audit: surfaces the parsed field — 0 = ordinary file, 1 = an
+    /// app the phone imported; the PC side only ever saves ordinary files today).
+    pub kind: u8,
 }
 
 struct Incoming {
@@ -114,6 +126,7 @@ struct Incoming {
     size: u64,
     name: String,
     sha: [u8; 32],
+    kind: u8,
     part: PathBuf,
     file: File,
     ctx: ring::digest::Context,
@@ -136,7 +149,13 @@ impl FileSink {
 
     pub fn on_message(&mut self, msg: &[u8]) -> Result<Option<Received>, String> {
         match parse(msg)? {
-            FileMsg::Start { id, size, name, sha } => {
+            FileMsg::Start { id, size, name, sha, kind } => {
+                // Audit: a START that arrives mid-transfer used to silently replace the
+                // previous Incoming and leave its .part file on disk forever. Delete it.
+                if let Some(prev) = self.current.take() {
+                    drop(prev.file);
+                    let _ = std::fs::remove_file(&prev.part);
+                }
                 let name = safe_name(&name);
                 let part = self.dir.join(format!(".{id}.part"));
                 let file = File::create(&part).map_err(|e| format!("create {part:?}: {e}"))?;
@@ -145,6 +164,7 @@ impl FileSink {
                     size,
                     name,
                     sha,
+                    kind,
                     part,
                     file,
                     ctx: ring::digest::Context::new(&ring::digest::SHA256),
@@ -183,7 +203,12 @@ impl FileSink {
                 std::fs::rename(&cur.part, &final_path)
                     .map_err(|e| format!("rename {final_path:?}: {e}"))?;
                 self.completed += 1;
-                Ok(Some(Received { path: final_path, bytes: cur.got, sha_ok }))
+                Ok(Some(Received {
+                    path: final_path,
+                    bytes: cur.got,
+                    sha_ok,
+                    kind: cur.kind,
+                }))
             }
         }
     }
@@ -208,9 +233,11 @@ pub fn file_sha256(path: &Path) -> Result<[u8; 32], String> {
 }
 
 /// Stream a file as CH_FILE messages through `push` (called once per message).
+/// [kind] marks an ordinary file (KIND_FILE) or a user import (KIND_IMPORT, T15-3).
 pub fn send_file(
     id: u32,
     path: &Path,
+    kind: u8,
     push: &mut dyn FnMut(Vec<u8>) -> Result<(), String>,
 ) -> Result<(u64, [u8; 32]), String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("stat {path:?}: {e}"))?;
@@ -222,7 +249,7 @@ pub fn send_file(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
-    push(encode_start(id, meta.len(), &name, &sha))?;
+    push(encode_start(id, meta.len(), &name, &sha, kind))?;
     let mut f = File::open(path).map_err(|e| format!("open: {e}"))?;
     let mut buf = vec![0u8; MAX_DATA];
     let mut total = 0u64;
@@ -252,11 +279,24 @@ mod tests {
     #[test]
     fn messages_roundtrip_and_reject_garbage() {
         let sha = [7u8; 32];
-        let s = encode_start(9, 12345, "a.txt", &sha);
+        let s = encode_start(9, 12345, "a.txt", &sha, KIND_FILE);
         match parse(&s).unwrap() {
-            FileMsg::Start { id, size, name, sha: got } => {
+            FileMsg::Start { id, size, name, sha: got, kind } => {
                 assert_eq!((id, size, name.as_str(), got), (9, 12345, "a.txt", sha));
+                assert_eq!(kind, KIND_FILE);
             }
+            _ => panic!("not a start"),
+        }
+        // T15-3: an import START carries kind=1, and an older START without the byte reads 0.
+        let imp = encode_start(10, 1, "setup.exe", &sha, KIND_IMPORT);
+        match parse(&imp).unwrap() {
+            FileMsg::Start { kind, .. } => assert_eq!(kind, KIND_IMPORT),
+            _ => panic!("not a start"),
+        }
+        let mut old = encode_start(11, 1, "a.txt", &sha, KIND_FILE);
+        old.truncate(old.len() - 1);
+        match parse(&old).unwrap() {
+            FileMsg::Start { kind, .. } => assert_eq!(kind, KIND_FILE),
             _ => panic!("not a start"),
         }
         assert!(matches!(parse(&encode_data(9, b"hi")).unwrap(), FileMsg::Data { id: 9, .. }));
@@ -297,7 +337,7 @@ mod tests {
         std::fs::write(&src, &data).unwrap();
         let mut sink = FileSink::new(dst_dir.clone()).unwrap();
         let mut frames = 0usize;
-        let (sent, sha) = send_file(42, &src, &mut |msg| {
+        let (sent, sha) = send_file(42, &src, KIND_FILE, &mut |msg| {
             frames += 1;
             assert!(msg.len() <= 65536);
             if let Some(r) = sink.on_message(&msg)? {
@@ -321,7 +361,7 @@ mod tests {
         let d = tmp("corrupt");
         let mut sink = FileSink::new(d.clone()).unwrap();
         let sha = [1u8; 32];
-        sink.on_message(&encode_start(1, 4, "x.bin", &sha)).unwrap();
+        sink.on_message(&encode_start(1, 4, "x.bin", &sha, KIND_FILE)).unwrap();
         sink.on_message(&encode_data(1, b"abcd")).unwrap();
         assert!(sink.on_message(&encode_end(1)).is_err(), "wrong sha must fail");
         assert!(!d.join("x.bin").exists());

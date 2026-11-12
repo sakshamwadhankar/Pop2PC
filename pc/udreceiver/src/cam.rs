@@ -47,10 +47,21 @@ fn open_with_size(req_w: u32, req_h: u32) -> Result<Webcam, String> {
             return Err("no video capture device".into());
         }
         let list = std::slice::from_raw_parts(devices, count as usize);
-        let device = list[0].clone().ok_or("device slot empty")?;
+        let device_any = list[0].clone();
         let mut name = windows::core::PWSTR::null();
         let mut n = 0u32;
-        let _ = device.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut name, &mut n);
+        if let Some(d) = device_any.as_ref() {
+            let _ = d.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut name, &mut n);
+        }
+        // Audit: MFEnumDeviceSources' array and GetAllocatedString's buffer are both
+        // CoTaskMemAlloc'd; the windows crate releases the IMFActivate interfaces when
+        // they drop, but the two raw buffers leaked once per stream open until now. Free
+        // them immediately so no error path after this point can leak the array.
+        windows::Win32::System::Com::CoTaskMemFree(Some(devices.cast::<std::ffi::c_void>()));
+        if !name.is_null() {
+            windows::Win32::System::Com::CoTaskMemFree(Some(name.as_ptr().cast::<std::ffi::c_void>()));
+        }
+        let device = device_any.ok_or("device slot empty")?;
         let label = if name.is_null() {
             "unknown".to_string()
         } else {

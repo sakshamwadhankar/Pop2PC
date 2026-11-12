@@ -76,7 +76,7 @@ class Phase11FilesTest {
 
         val sink = Phase11Files.Sink(dstDir)
         var saved: File? = null
-        for (m in messages) saved = sink.onMessage(m) ?: saved
+        for (m in messages) saved = sink.onMessage(m)?.file ?: saved
         assertEquals("two.bin", saved?.name)
         assertArrayEquals(data, saved!!.readBytes())
         assertArrayEquals(Phase11Files.sha256(data), Phase11Files.sha256(saved))
@@ -98,5 +98,31 @@ class Phase11FilesTest {
         }
         assertNull(d.listFiles()?.firstOrNull { it.name == "x.bin" })
         assertEquals(0, d.listFiles()!!.size)
+    }
+
+    @Test
+    fun theStartKindByteIsTheLastByteAndDefaultsToFile() {
+        val sha = ByteArray(32) { 3 }
+        val file = Phase11Files.encodeStart(1, 2, "a.exe", sha)
+        assertEquals(Phase11Files.KIND_FILE, file.last().toInt() and 0xFF)
+        val imp = Phase11Files.encodeStart(1, 2, "a.exe", sha, Phase11Files.KIND_IMPORT)
+        assertEquals(Phase11Files.KIND_IMPORT, imp.last().toInt() and 0xFF)
+        assertEquals(file.size + 0, imp.size)
+    }
+
+    @Test
+    fun anImportFlaggedTransferLandsInTheImportFolder() {
+        val desk = tmp("desk")
+        val imp = tmp("imp")
+        val data = "MZ port".toByteArray()
+        val sha = Phase11Files.sha256(data)
+        val sink = Phase11Files.Sink(desk, imp)
+        assertNull(sink.onMessage(Phase11Files.encodeStart(7, data.size.toLong(), "tool.exe", sha, Phase11Files.KIND_IMPORT)))
+        assertNull(sink.onMessage(Phase11Files.encodeData(7, data, 0, data.size)))
+        val got = sink.onMessage(Phase11Files.encodeEnd(7))
+        assertEquals("tool.exe", got?.file?.name)
+        assertEquals(Phase11Files.KIND_IMPORT, got?.kind)
+        assertTrue("imports must not land in the desktop folder", desk.listFiles()!!.isEmpty())
+        assertEquals(1, imp.listFiles()!!.size)
     }
 }

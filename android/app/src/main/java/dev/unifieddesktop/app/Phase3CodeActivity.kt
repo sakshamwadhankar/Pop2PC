@@ -10,7 +10,8 @@ import java.io.File
 
 /**
  * Item 7: the Phase-3 gate surface - a WebView that shows code-server's browser
- * workbench. The server (Phase3Server) binds 127.0.0.1 only with `auth: none` (B-106);
+ * workbench. The server (Phase3Server) binds 127.0.0.1 only and uses password auth with
+ * a per-start random secret (B-108/D20; the old `auth: none` note below was stale);
  * this activity reads the port from the app-private session file and loads the
  * workbench directly. Nothing opens the listener to the network.
  *

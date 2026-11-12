@@ -28,8 +28,11 @@
    <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
   </activity>
   <!-- HarnessActivity stays for the test commands; the debug manifest restores its
-       LAUNCHER icon, release builds show only HomeActivity. -->
-  <activity android:name=".HarnessActivity" android:screenOrientation="landscape" android:exported="true"/>
+       LAUNCHER icon AND re-exports it (debug only). RELEASE BUILDS DO NOT EXPORT IT:
+       an exported harness reachable by any installed app is an intent-extra code-exec
+       surface (audit B-138: phase3x=node:<js> reaches libnode.so with app privileges).
+       HarnessReceiver stays the only test channel, and it is debug-only + DUMP-guarded. -->
+  <activity android:name=".HarnessActivity" android:screenOrientation="landscape" android:exported="false"/>
   <activity android:name=".SelfTestActivity" android:exported="false"/>
   <activity android:name=".Phase3CodeActivity" android:exported="false" android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"/>

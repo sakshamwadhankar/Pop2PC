@@ -107,6 +107,18 @@ class AppCenterView(context: Context) : LinearLayout(context) {
             })
         }, LayoutParams(LayoutParams.MATCH_PARENT, 108).apply { topMargin = 6 })
         addView(actionRow(), LayoutParams(LayoutParams.MATCH_PARENT, 34).apply { topMargin = 6 })
+        // T15-3: the Import entry. "From PC" asks the desktop's receiver to show its
+        // .exe/.msi/.zip dialog; "From URL" fetches the link with the proven resume path.
+        // Both stage the file in desktop/Imported and add a row under the start menu's
+        // Imported section; nothing runs until the user taps that row.
+        addView(LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(shellButton(context, "Import from PC") { importFromPc() }, LayoutParams(136, 30))
+            addView(shellButton(context, "Import from URL") { importFromUrl() }, LayoutParams(140, 30).apply {
+                marginStart = 6
+            })
+        }, LayoutParams(LayoutParams.MATCH_PARENT, 30).apply { topMargin = 6 })
         addView(shellButton(context, "Open a Windows program") { pickWindowsProgram() }, LayoutParams(248, 30).apply {
             topMargin = 8
         })
@@ -451,8 +463,48 @@ class AppCenterView(context: Context) : LinearLayout(context) {
         return "Files opened: choose a .exe"
     }
 
-    /** Install the selected app. Fast kinds answer now; downloads/imports run on a thread. */
-    fun installSelected(): String {
+    /**
+     * T15-3: "Import from PC". The file dialog must run on the PC (only it can read the
+     * user's disk), so this sends CH_CONTROL "import-pick"; the receiver opens its
+     * .exe/.msi/.zip dialog and pushes the chosen file back over the verified Files channel,
+     * where the link service stages it as an import.
+     */
+    fun importFromPc(): String {
+        val sess = Phase5Dispatch.session()
+        if (sess == null || !sess.sendControl("import-pick")) {
+            status.text = "Import from PC: connect the PC first"
+            say("import from pc: no link")
+            return status.text.toString()
+        }
+        status.text = "Import from PC: choose the .exe, .msi or .zip in the dialog on the PC"
+        say("import from pc: dialog requested")
+        return status.text.toString()
+    }
+
+    /**
+     * T15-3: "Import from URL". The link is fetched with the same Range/resume downloader the
+     * app uses for its runtime, then staged exactly like a PC import.
+     */
+    fun importFromUrl(): String {
+        val s = shell() ?: return "no shell"
+        s.prompt("Import from URL", "https://...an .exe or .msi", "Import") { url ->
+            val u = url.trim()
+            status.text = "downloading ${u.take(60)} ..."
+            say("import from url $u")
+            Thread {
+                val r = ImportedApps.importFromUrl(context, u) { line -> P7Log.say(context, "IMPORT $line") }
+                post {
+                    status.text = r.message
+                    shell()?.toast(r.message)
+                    shell()?.refreshInstalledRows()
+                }
+                P7Log.say(context, "IMPORT url -> ${r.message}")
+            }.start()
+        }
+        return "url dialog"
+    }
+
+    /** Install the selected app. Fast kinds answer now; downloads/imports run on a thread. */    fun installSelected(): String {
         val app = selected ?: return "no app selected"
         val v = picked ?: Catalog.pick(app) ?: return "no version"
         if (!Catalog.isUsable(v)) return "Not yet: ${v.note.ifEmpty { v.rating }}"

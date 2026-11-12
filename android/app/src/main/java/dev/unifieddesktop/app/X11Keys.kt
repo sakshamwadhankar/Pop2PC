@@ -31,3 +31,22 @@ object X11Keys {
         }
     }
 }
+
+/**
+ * B-140: the key-edge policy for the PC -> XTEST route, pure so the repeat-key rules are
+ * pinned without an X server.
+ *
+ * This Xvfb drops a synthetic KeyRelease when a keycode is pressed twice inside its
+ * auto-repeat delay; the key stays down, so the next press is seen by the client as a repeat
+ * (Notepad++ swallows it: "npp15ok" typed as "np15ok") or the key auto-repeats forever
+ * (B-077 family). Two decisions keep the route correct:
+ *  - before a press, if we still hold that keycode, release it first (a real key-up);
+ *  - after a release, ask the server's keymap; if the key is still down, release again.
+ */
+object X11KeyGate {
+    /** Press for a keycode still in our held set: the last release was dropped. */
+    fun releaseBeforePress(down: Boolean, alreadyHeld: Boolean): Boolean = down && alreadyHeld
+
+    /** The server keymap says the key is still down after our KeyRelease. */
+    fun needsAnotherRelease(stillDown: Boolean): Boolean = stillDown
+}

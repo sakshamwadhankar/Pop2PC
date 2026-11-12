@@ -304,6 +304,8 @@ class StartMenuView(context: Context) : LinearLayout(context) {
         val catalogId: String?,
         val kind: String,
         val color: Int,
+        /** T15-3: set for an imported app, so a search can find and run it too. */
+        val imported: ImportedApps.ImportedApp? = null,
     )
 
     private val search = EditText(context).apply {
@@ -333,6 +335,13 @@ class StartMenuView(context: Context) : LinearLayout(context) {
     private val installed = ArrayList<MenuRow>()
     private var shown: List<Entry> = emptyList()
 
+    // T15-3: the user's imported apps, shown as their own section below the app list.
+    private val importedRows = ArrayList<ImportedApps.ImportedApp>()
+    var onLaunchImported: ((ImportedApps.ImportedApp) -> Unit)? = null
+    // T15-3: Windows shortcuts an installer created (MSI imports), shown under their own label.
+    private val windowsRows = ArrayList<Pair<String, java.io.File>>()
+    var onLaunchWindows: ((java.io.File) -> Unit)? = null
+
     init {
         orientation = VERTICAL
         setPadding(12, 12, 12, 10)
@@ -340,7 +349,6 @@ class StartMenuView(context: Context) : LinearLayout(context) {
         elevation = 24f
         addView(search, LayoutParams(LayoutParams.MATCH_PARENT, 40))
         addView(pinnedRow, LayoutParams(LayoutParams.MATCH_PARENT, 88).apply { topMargin = 10 })
-        addView(sectionLabel("All apps"), LayoutParams(LayoutParams.WRAP_CONTENT, 24).apply { topMargin = 8 })
         addView(allScroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = 2 })
 
         for (app in PINNED) {
@@ -379,17 +387,43 @@ class StartMenuView(context: Context) : LinearLayout(context) {
         rebuild(search.text?.toString().orEmpty())
     }
 
+
+    fun setImportedRows(list: List<ImportedApps.ImportedApp>) {
+        importedRows.clear()
+        importedRows.addAll(list)
+        rebuild(search.text?.toString().orEmpty())
+    }
+
+    fun importedCount(): Int = importedRows.size
+
+    /** T15-3: the PC wheel over the panel scrolls the app/import list. */
+    fun scrollList(delta: Int) {
+        allScroll.scrollBy(0, -delta.coerceIn(-3, 3) * 60)
+    }
+
+
+    fun setWindowsRows(list: List<Pair<String, java.io.File>>) {
+        windowsRows.clear()
+        windowsRows.addAll(list)
+        rebuild(search.text?.toString().orEmpty())
+    }
+
     /**
      * Manager 03:56: the panel must size itself to its content (search + pinned + rows) so
      * it never grows past the work area. One 40 px row per app; the caller caps it at 70 %
      * of the work area and the list scrolls inside.
      */
-    fun preferredHeight(): Int = 204 + shown.size * 40
+    fun preferredHeight(): Int =
+        StartMenuLayout.panelHeight(shown.size) +
+            StartMenuLayout.importedExtra(importedRows.size) +
+            StartMenuLayout.windowsExtra(windowsRows.size)
 
     /** Harness proof: the fixed rows plus the real installed rows, without Test. */
     fun rowsText(): String =
         (listOf("Programs") + PINNED.map { it.title() } + BUILTIN.map { it.title() } +
-            installed.map { it.label }).joinToString(" | ")
+            installed.map { it.label } +
+            importedRows.map { "Imported:" + it.name } +
+            windowsRows.map { "Windows:" + it.first }).joinToString(" | ")
 
     /** The PC keyboard while the menu is open: type to filter, Enter opens the first match. */
     fun handleKey(down: Boolean, keyCode: Int, scan: Int, meta: Int): Boolean {
@@ -450,12 +484,58 @@ class StartMenuView(context: Context) : LinearLayout(context) {
             }
             entries.add(Entry(r.label, null, r.appId, kind, color))
         }
+        // T15-3: a search also finds imported apps (the Imported section itself is hidden
+        // while a query is active, so without this a search would hide the user's imports).
+        if (q.isNotEmpty()) {
+            for (e in importedRows) {
+                entries.add(Entry(e.name, null, null, DeskIcon.TERMINAL, Theme.ACCENT, e))
+            }
+        }
         val matches = if (q.isEmpty()) entries else entries.filter { it.label.lowercase().contains(q) }
         // Pinned grid: show it only when the user is not searching; the all-apps list always
         // holds every match, so a search has exactly one answer list.
         pinnedRow.visibility = if (q.isEmpty()) View.VISIBLE else View.GONE
         shown = matches
         allCol.removeAllViews()
+        // T15-3: the user's imports come FIRST, so the feature is visible without scrolling:
+        // an exe runs, an msi shows its installer on the desktop (ImportedApps.launchFor).
+        if (q.isEmpty() && importedRows.isNotEmpty()) {
+            allCol.addView(sectionLabel("Imported").apply {
+                setPadding(6, 6, 6, 4)
+            }, LayoutParams(LayoutParams.MATCH_PARENT, 30))
+            for (entry in importedRows) {
+                val kind = when (ImportedApps.launchFor(entry)) {
+                    ImportedApps.Launch.MSI -> DeskIcon.WINDOW
+                    ImportedApps.Launch.EXE, ImportedApps.Launch.ZIP_EXE -> DeskIcon.TERMINAL
+                    else -> DeskIcon.NOTE
+                }
+                val row = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(8, 0, 8, 0)
+                    isClickable = true
+                    setOnClickListener { onLaunchImported?.invoke(entry) }
+                    addView(AppIconView(context, kind, Theme.ACCENT), LayoutParams(26, 26))
+                    addView(TextView(context).apply {
+                        text = entry.name
+                        setTextColor(Theme.TEXT)
+                        Theme.px(this, Theme.BODY_LARGE)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                        setPadding(10, 0, 0, 0)
+                    }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+                    addView(TextView(context).apply {
+                        text = if (entry.kind == ImportedApps.KIND_MSI) "installer" else entry.kind
+                        setTextColor(Theme.TEXT_DIM)
+                        Theme.px(this, Theme.CAPTION)
+                    })
+                }
+                allCol.addView(row, LayoutParams(LayoutParams.MATCH_PARENT, 40))
+            }
+        }
+        allCol.addView(sectionLabel("All apps").apply {
+            setPadding(6, 6, 6, 2)
+        }, LayoutParams(LayoutParams.MATCH_PARENT, 28))
         for (e in matches) {
             val row = LinearLayout(context).apply {
                 orientation = HORIZONTAL
@@ -483,6 +563,33 @@ class StartMenuView(context: Context) : LinearLayout(context) {
                 setPadding(10, 12, 10, 12)
             })
         }
+        // T15-3: Windows shortcuts an installed MSI created (Start Menu .lnk files). They are
+        // what "the app lands in the start menu" means for an arbitrary installer: its own
+        // shortcut, launched through Wine's shell.
+        if (q.isEmpty() && windowsRows.isNotEmpty()) {
+            allCol.addView(sectionLabel("Windows programs").apply {
+                setPadding(6, 10, 6, 4)
+            }, LayoutParams(LayoutParams.MATCH_PARENT, 34))
+            for ((label, lnk) in windowsRows) {
+                val row = LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(8, 0, 8, 0)
+                    isClickable = true
+                    setOnClickListener { onLaunchWindows?.invoke(lnk) }
+                    addView(AppIconView(context, DeskIcon.WINDOW, Theme.WARNING), LayoutParams(26, 26))
+                    addView(TextView(context).apply {
+                        text = label
+                        setTextColor(Theme.TEXT)
+                        Theme.px(this, Theme.BODY_LARGE)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                        setPadding(10, 0, 0, 0)
+                    }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+                }
+                allCol.addView(row, LayoutParams(LayoutParams.MATCH_PARENT, 40))
+            }
+        }
     }
 
     private fun launch(app: ShellRoot.App) {
@@ -490,6 +597,11 @@ class StartMenuView(context: Context) : LinearLayout(context) {
     }
 
     private fun open(e: Entry) {
+        val imp = e.imported
+        if (imp != null) {
+            onLaunchImported?.invoke(imp)
+            return
+        }
         val app = e.app
         if (app != null) onLaunch?.invoke(app) else e.catalogId?.let { onLaunchInstalled?.invoke(it) }
     }

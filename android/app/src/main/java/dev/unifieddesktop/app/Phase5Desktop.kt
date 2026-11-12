@@ -143,7 +143,9 @@ class Phase5Desktop(
                 pres = p
                 running = true
                 android.util.Log.i(TAG, "shell presentation shown on display ${d.display.displayId}")
-                // B3/Phase 12: optional background warm-up, off unless `p12warm` enabled it.
+                // D21 (audit docs-truth fix): Wine warm-up runs here by default, gated by
+                // the D21 usage condition inside Phase12Preload; `p12warm` only forces or
+                // switches its mode.
                 Phase12Preload.start(context)
                 return true
             } catch (t: Throwable) {

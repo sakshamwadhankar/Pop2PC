@@ -75,12 +75,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PeekMessageW, SetCursor,
     GetSystemMetrics, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    GWL_STYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_SHOWWINDOW, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
+    GWL_STYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_FRAMECHANGED, SWP_SHOWWINDOW, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_PAINT,
     WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE,
     WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
-    WINDOW_EX_STYLE,
+    WINDOW_EX_STYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 
 use crate::phase5::{self, InputEvent, VideoFrame};
@@ -91,8 +91,8 @@ use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDR
 /// B-067: a Windows socket read can surface a timed-out or still-pending operation as a raw OS
 /// error instead of WouldBlock/TimedOut (997 = ERROR_IO_PENDING, 10060 = WSAETIMEDOUT). The
 /// view's read loop treats those as "no data this tick" (it checks again next iteration);
-/// every other error stays fatal.
-#[allow(dead_code)]
+/// every other error stays fatal. (Audit: the stale #[allow(dead_code)] here is gone - the
+/// function is used by the read loop.)
 fn is_transient_read(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
@@ -149,8 +149,11 @@ struct Shared {
     /// clipboard text this process saw on either end (loop guard).
     clip_out: Mutex<Option<Vec<u8>>>,
     clip_hash: AtomicU64,
-    /// Phase 11 D-d: files the user dropped on the window or picked in the Import dialog.
-    files_out: Mutex<Vec<std::path::PathBuf>>,
+    /// Phase 11 D-d / T15-3: files waiting to go to the phone, each with its START kind
+    /// (KIND_FILE for a drop, KIND_IMPORT for the "Import app" dialog).
+    files_out: Mutex<Vec<(std::path::PathBuf, u8)>>,
+    /// T15-3: the "Import app" child button on the view window (0 until created).
+    import_btn: AtomicU64,
 }
 
 impl Shared {
@@ -184,14 +187,15 @@ impl Shared {
             clip_out: Mutex::new(None),
             clip_hash: AtomicU64::new(0),
             files_out: Mutex::new(Vec::new()),
+            import_btn: AtomicU64::new(0),
         });
         // Harness/test hook: UD_VIEW_IMPORT=<path> queues one "Import from this PC" file at
-        // startup, so the PC->phone file path can be proven without driving the Open dialog.
+        // startup, so the PC->phone import path can be proven without driving the Open dialog.
         if let Some(p) = std::env::var_os("UD_VIEW_IMPORT") {
             let p = std::path::PathBuf::from(p);
             if p.is_file() {
                 if let Ok(mut q) = me.files_out.lock() {
-                    q.push(p);
+                    q.push((p, crate::files::KIND_IMPORT));
                 }
             }
         }
@@ -596,6 +600,11 @@ fn create_window(shared: &Arc<Shared>) -> Result<HWND, String> {
         .map_err(|e| format!("CreateWindowExW: {e}"))?;
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), wx, wy, ww, wh, SWP_SHOWWINDOW);
         let _ = ShowWindow(hwnd, SW_SHOW);
+        // T15-3: the "Import app" button lives in its own always-on-top window. A GDI child
+        // control is not reliably composited over a flip-model DXGI swap chain (measured:
+        // the child exists but never appears), and a real button the user can see and click
+        // is the point of the feature.
+        create_import_button(hinstance, sw, shared, hwnd);
         let _ = SetFocus(Some(hwnd));
         focus_window(hwnd);
         let mut rc = RECT::default();
@@ -612,8 +621,79 @@ fn create_window(shared: &Arc<Shared>) -> Result<HWND, String> {
     }
 }
 
-fn mods() -> u8 {
+/// T15-3: the "Import app" button window. It is a separate top-level window because a GDI
+/// child control is not reliably composited over the flip-model DXGI swap chain; the button
+/// must be visible to be usable. It floats above the streamed desktop in the top-right corner.
+fn create_import_button(hinstance: HMODULE, screen_w: i32, shared: &Arc<Shared>, owner: HWND) {
     unsafe {
+        let class_name = HSTRING::from("udreceiver-import-btn");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(import_wndproc),
+            hInstance: HINSTANCE(hinstance.0),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
+            ..Default::default()
+        };
+        let _ = RegisterClassW(&wc);
+        let x = screen_w - 190;
+        if let Ok(iw) = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            PCWSTR(class_name.as_ptr()),
+            windows::core::w!("Import app"),
+            WS_POPUP | WS_VISIBLE,
+            x,
+            14,
+            176,
+            42,
+            Some(owner),
+            None,
+            Some(HINSTANCE(hinstance.0)),
+            None,
+        ) {
+            let _ = SetWindowPos(iw, Some(HWND_TOPMOST), x, 14, 176, 42, SWP_SHOWWINDOW);
+            shared.import_btn.store(iw.0 as u64, Ordering::SeqCst);
+            println!("[{TAG}] import button window ready");
+        } else {
+            eprintln!("[{TAG}] import button window FAILED: {}", windows::Win32::Foundation::GetLastError().0);
+        }
+    }
+}
+
+unsafe extern "system" fn import_wndproc(hwnd: HWND, msg: u32, _wparam: WPARAM, _lparam: LPARAM) -> LRESULT {
+    use windows::Win32::Graphics::Gdi::{
+        BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
+        SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT, TRANSPARENT,
+    };
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let brush = CreateSolidBrush(COLORREF(0x00201810));
+            FillRect(hdc, &rc, brush);
+            let _ = DeleteObject(brush.into());
+            let mut text: Vec<u16> = "Import app\0".encode_utf16().collect();
+            let _ = SetTextColor(hdc, COLORREF(0x00F2ECE8));
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let mut trc = rc;
+            let _ = DrawTextW(hdc, &mut text, &mut trc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if let Some(shared) = SHARED.get() {
+                let main = HWND(shared.hwnd.load(Ordering::SeqCst) as *mut std::ffi::c_void);
+                pick_import_file(main, shared);
+                let _ = SetFocus(Some(main));
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, _wparam, _lparam),
+    }
+}
+
+fn mods() -> u8 {    unsafe {
         let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
         let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
         let alt = GetKeyState(VK_MENU.0 as i32) < 0;
@@ -669,6 +749,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 shared.client_w.store(w, Ordering::SeqCst);
                 shared.client_h.store(h, Ordering::SeqCst);
             }
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            // T15-3: the "Import app" window's own click handling is in import_wndproc; this
+            // arm only keeps the message from reaching DefWindowProc (menu beeps).
             LRESULT(0)
         }
         WM_KILLFOCUS => {
@@ -971,6 +1056,12 @@ fn pipeline_loop(
     let mut next_file_id: u32 = 1;
     let mut last_rx = Instant::now();
     let mut last_csq = Instant::now() - Duration::from_secs(2);
+    // Audit row 25 (adaptive bitrate): once per second the phone gets the receiver's own
+    // video picture as `vq fps=<delta> dropped=<delta> rx=<delta bytes>`; the deltas are
+    // per-second values, never totals, so the phone's policy sees bursts, not history.
+    let mut last_vq_presented = 0u64;
+    let mut last_vq_dropped = 0u64;
+    let mut last_vq_bytes = 0u64;
     let mut clock = phase5::ClockSync::new();
     let mut last_need = Instant::now() - Duration::from_secs(9);
     let mut media = MediaBridge::new();
@@ -1037,12 +1128,25 @@ fn pipeline_loop(
         }
         if last_csq.elapsed() > Duration::from_secs(1) {
             let t = now_us64();
+            let presented = shared.presented.load(Ordering::Relaxed);
+            let dropped = shared.dropped_frames.load(Ordering::Relaxed);
+            let bin = shared.bytes_in.load(Ordering::Relaxed);
+            let vq = format!(
+                "vq fps={:.1} dropped={} rx={}",
+                (presented.saturating_sub(last_vq_presented)) as f64,
+                dropped.saturating_sub(last_vq_dropped),
+                bin.saturating_sub(last_vq_bytes),
+            );
+            last_vq_presented = presented;
+            last_vq_dropped = dropped;
+            last_vq_bytes = bin;
             let mut w = PriorityWriter::new(&mut session.tls);
             let _ = w.push(Message::new(CH_CONTROL, format!("csq {t}").into_bytes())?);
+            let _ = w.push(Message::new(CH_CONTROL, vq.into_bytes())?);
             let _ = w.emit_all();
             last_csq = Instant::now();
         }
-        if last_rx.elapsed() > Duration::from_secs(5) {
+        if last_rx.elapsed() >= crate::session::KEEPALIVE_INTERVAL {
             let mut w = PriorityWriter::new(&mut session.tls);
             let _ = w.push(Message::new(CH_CONTROL, Vec::new())?);
             let _ = w.emit_all();
@@ -1094,8 +1198,21 @@ fn pipeline_loop(
                         // 15 s inbound watchdog closes an otherwise healthy stream.
                         if last_csq.elapsed() > Duration::from_secs(1) {
                             let t = now_us64();
+                            let presented = shared.presented.load(Ordering::Relaxed);
+                            let dropped = shared.dropped_frames.load(Ordering::Relaxed);
+                            let bin = shared.bytes_in.load(Ordering::Relaxed);
+                            let vq = format!(
+                                "vq fps={:.1} dropped={} rx={}",
+                                (presented.saturating_sub(last_vq_presented)) as f64,
+                                dropped.saturating_sub(last_vq_dropped),
+                                bin.saturating_sub(last_vq_bytes),
+                            );
+                            last_vq_presented = presented;
+                            last_vq_dropped = dropped;
+                            last_vq_bytes = bin;
                             let mut w = PriorityWriter::new(&mut session.tls);
                             let _ = w.push(Message::new(CH_CONTROL, format!("csq {t}").into_bytes())?);
+                            let _ = w.push(Message::new(CH_CONTROL, vq.into_bytes())?);
                             let _ = w.emit_all();
                             last_csq = Instant::now();
                         }
@@ -1134,6 +1251,22 @@ fn pipeline_loop(
                         match text.trim() {
                             "cam-on" => media.cam_on(),
                             "cam-off" => media.cam_off("phone asked"),
+                            // T15-3: the phone's "Import from PC" button. The dialog is
+                            // modal, so it runs on its own thread; the pipeline keeps the
+                            // video and input flowing while the user picks a file.
+                            "import-pick" => {
+                                let h = hwnd.0 as isize;
+                                let sh = Arc::clone(shared);
+                                std::thread::spawn(move || {
+                                    unsafe {
+                                        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                                    }
+                                    pick_import_file(HWND(h as *mut std::ffi::c_void), &sh);
+                                    unsafe {
+                                        let _ = SetFocus(Some(HWND(h as *mut std::ffi::c_void)));
+                                    }
+                                });
+                            }
                             _ if whole.starts_with(b"lat ") => p.handle_lat(&whole, &clock),
                             _ if whole.starts_with(b"ping ") => {
                                 if let Some(out) = phase5::pong_for(&whole) {
@@ -1150,9 +1283,10 @@ fn pipeline_loop(
                 CH_CAM => { /* phone -> PC camera is not a thing; ignore */ }
                 CH_FILE => match file_sink.on_message(&m.payload) {
                     Ok(Some(done)) => println!(
-                        "[{TAG}] <- phone file {} {} bytes sha_ok={}",
+                        "[{TAG}] <- phone file {} {} bytes kind={} sha_ok={}",
                         done.path.display(),
                         done.bytes,
+                        done.kind,
                         done.sha_ok
                     ),
                     Ok(None) => {}
@@ -1213,7 +1347,9 @@ fn pipeline_loop(
 
 /// Send every locally queued input event now. Called at both levels of the pipeline loop:
 /// the inner loop is the one that runs while video is continuous, so draining only in the
-/// outer loop leaves a real mouse click sitting in the queue indefinitely./// Phase 11 D-c: a PC clipboard change. Hash-guarded: a text this process itself put on
+/// outer loop leaves a real mouse click sitting in the queue indefinitely.
+///
+/// Phase 11 D-c: a PC clipboard change. Hash-guarded: a text this process itself put on
 /// the clipboard (a phone->PC clip) must not travel back to the phone.
 fn queue_local_clip(shared: &Shared) {
     let Some(bytes) = crate::clip::read_text() else { return };
@@ -1259,7 +1395,7 @@ unsafe fn collect_dropped_files(wparam: WPARAM, shared: &Shared) {
         let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         let path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..end]));
         if let Ok(mut q) = shared.files_out.lock() {
-            q.push(path);
+            q.push((path, crate::files::KIND_FILE));
         }
         println!("[{TAG}] import queued (drop)");
     }
@@ -1272,12 +1408,18 @@ fn pick_import_file(hwnd: HWND, shared: &Shared) {
         GetOpenFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
     };
     let mut buf = vec![0u16; 4096];
+    // T15-3: the import dialog offers the file kinds the feature can use (.exe, .msi and a
+    // portable .zip), while "All files" keeps the old "send any file" ability.
+    let filter: Vec<u16> = "Apps (*.exe;*.msi;*.zip)\0*.exe;*.msi;*.zip\0All files (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect();
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: hwnd,
         lpstrFile: windows::core::PWSTR(buf.as_mut_ptr()),
         nMaxFile: buf.len() as u32,
-        lpstrTitle: windows::core::w!("Import from this PC"),
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrTitle: windows::core::w!("Import an app from this PC"),
         Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
         ..Default::default()
     };
@@ -1288,7 +1430,7 @@ fn pick_import_file(hwnd: HWND, shared: &Shared) {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..end]));
     if let Ok(mut q) = shared.files_out.lock() {
-        q.push(path);
+        q.push((path, crate::files::KIND_IMPORT));
     }
     println!("[{TAG}] import queued (dialog)");
 }
@@ -1310,20 +1452,20 @@ fn service_files<W: std::io::Write>(
     next_id: &mut u32,
 ) -> Result<(), String> {
     if q.is_none() {
-        let path = shared
+        let next = shared
             .files_out
             .lock()
             .ok()
             .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) });
-        if let Some(p) = path {
+        if let Some((p, kind)) = next {
             let mut buf = std::collections::VecDeque::new();
-            match crate::files::send_file(*next_id, &p, &mut |m| {
+            match crate::files::send_file(*next_id, &p, kind, &mut |m| {
                 buf.push_back(m);
                 Ok(())
             }) {
                 Ok((n, sha)) => {
                     println!(
-                        "[{TAG}] -> phone file {} {n} bytes sha={}",
+                        "[{TAG}] -> phone file {} {n} bytes kind={kind} sha={}",
                         p.display(),
                         &crate::crypto::fingerprint_hex(&sha)[..16]
                     );

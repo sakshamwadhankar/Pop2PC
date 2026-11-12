@@ -23,11 +23,9 @@ pub const BENCH_MESSAGE_LEN: usize = 1 << 20; // 1 MiB logical messages
 /// 2026-10-18 via /proc/net/tcp on the emulator, queues identical minutes apart).
 /// 256 KiB stays inside every buffer on that path. `--window-kib` overrides it.
 pub const BENCH_WINDOW_BYTES: u64 = 256 << 10;
-/// Keep-alive cadence (docs/PHASE4_PROTOCOL.md); every framework callsite logs it, the
-/// bench quiescent path messages it from Phase 5.
-#[allow(dead_code)]
+/// Keep-alive cadence (docs/PHASE4_PROTOCOL.md); the view pipeline sends its empty
+/// control frame on this cadence (audit: it was hard-coded at the callsite).
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
-#[allow(dead_code)]
 pub const LINK_DEAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One raw chunk of the TLS byte stream, handed from the reader thread to the TLS state

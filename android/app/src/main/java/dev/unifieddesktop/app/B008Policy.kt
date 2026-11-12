@@ -1,9 +1,9 @@
 package dev.unifieddesktop.app
 
 /**
- * B-008 decisions (T15-2): the phone screen goes black while a guest runs because the
- * guest's placeholder task sits TOP on display 0 (its window is alpha=0, so display 0 draws
- * nothing) and the PopToPC home is stopped behind it. Two engine-level attempts, in order:
+ * B-008 decisions (T15-2 + owner direction 2026-11-13): the phone screen goes black while a
+ * guest runs because the guest's placeholder window sits TOP on display 0. Two engine-level
+ * attempts came first, both measured:
  *
  * (b) DISPLAY-FIRST: ask the engine to start the guest's stub directly on the window's own
  *     private display (the engine now forwards launch options to the real AMS - see the
@@ -13,10 +13,7 @@ package dev.unifieddesktop.app
  *     allowEmbedded AND the caller has ACTIVITY_EMBEDDING or already has an activity of its
  *     uid on that display - so a denial is the expected outcome; the caller then falls back.
  * (a) HOME-TO-FRONT: on the proven B1 (decor-move) path, bring the PopToPC home activity's
- *     task to the front OVER the guest instead of moving the guest away. The guest must keep
- *     running (T15-1 measured: moving the guest task back stops it and its Presentation
- *     loses frames). If the PC stream keeps presenting AND the phone shows home, this wins;
- *     otherwise the no-move guard stays and the bug stays open.
+ *     task to the front OVER the guest instead of moving the guest away.
  *
  *  MEASURED 2026-11-09 (T15-2B), phone 2c0f6edc: (a) FAILS. As coded, the startActivity runs
  *  on the window's display-49 context, so AMS attached launchDisplayId=49 (a private,
@@ -25,7 +22,22 @@ package dev.unifieddesktop.app
  *  Forced onto display 0 with the same reorder flags (adb am start --display 0), the home did
  *  come to the front, but the guest stopped and the PC's Android window went black by +8 s
  *  and stayed black at +20 s - the same outcome T15-1 measured for moveTaskToBack. So
- *  HOME_TO_FRONT is OFF: the no-move guard stays and B-008 stays open.
+ *  HOME_TO_FRONT stays OFF.
+ *
+ * (c) TRANSLUCENT GUEST WINDOW (the fix, owner direction 2026-11-13): the root cause was
+ *     lifecycle, not task order. An alpha-0 window is still OPAQUE to the window manager,
+ *     so display 0 treated everything behind the guest as invisible - the home behind was
+ *     STOPPED and the phone composited black. Making the guest window TRANSLUCENT
+ *     (`Window.setFormat(TRANSLUCENT)` + `Activity.setTranslucent(true)` + a transparent
+ *     background, all public APIs applied before super.onCreate in
+ *     GuestPresentationHost.beforeMainActivityOnCreate) keeps the activity behind STARTED
+ *     (only onPause, never onStop) so the phone keeps showing real content, while the guest
+ *     itself stays RESUMED (still the front task) and its Presentation on the private
+ *     display keeps rendering - the exact failure that killed (a) never happens, because
+ *     nothing covers the guest. Verified against the documented translucent-activity
+ *     lifecycle rule (stackoverflow.com/questions/51536494;
+ *     developer.android.com/guide/components/activities/tasks-and-back-stack) and against
+ *     the emulator before/after screenshots (B-008 round, 2026-11-13).
  *
  * Everything here is a pure decision so the unit suite can pin it without a device.
  */
@@ -37,6 +49,13 @@ object B008Policy {
      *  OFF since 2026-11-09: see the class comment - the measured attempt killed the guest's
      *  PC stream. Turning this back on needs a new mechanism, not a retry. */
     const val HOME_TO_FRONT = false
+
+    /**
+     * Attempt (c): the guest window must be translucent (see the class comment). ON: it is
+     * the B-008 fix and applies to every guest activity through
+     * GuestPresentationHost.beforeMainActivityOnCreate.
+     */
+    const val GUEST_WINDOW_TRANSLUCENT = true
 
     /** T15-1's +6 s move showed both sides working at +8 s and PC black at +20 s; the same
      *  delay makes the home-to-front probe directly comparable. */

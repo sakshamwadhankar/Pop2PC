@@ -242,9 +242,30 @@ class X11WindowContent(context: Context) :
 
     override fun mouseMove(x: Int, y: Int) { }
 
+    /**
+     * Audit B-147: X11 apps need the middle and right buttons (context menus, paste) and
+     * never got them — only the wheel and the touch-routed left button reached Xvfb. The
+     * PC's button numbers (0 left / 1 right / 2 middle) map to X buttons 1/3/2, and the
+     * event goes through the same serialized XTEST executor as everything else.
+     */
     override fun mouseButton(button: Int, down: Boolean, x: Int, y: Int) {
-        // The shell routes real left-button presses through dispatchTouchEvent (onTouchEvent
-        // above); this stays as the ShellMouseContent contract for non-touch dispatch.
+        val client = x11 ?: return
+        val xbtn = when (button) {
+            Phase5Protocol.BTN_LEFT -> 1
+            Phase5Protocol.BTN_RIGHT -> 3
+            Phase5Protocol.BTN_MIDDLE -> 2
+            else -> return
+        }
+        submit {
+            try {
+                synchronized(xio) {
+                    client.motion(x.coerceIn(0, W - 1), y.coerceIn(0, H - 1))
+                    client.button(xbtn, down)
+                }
+            } catch (t: Throwable) {
+                P7Log.say(context, "P7X11 button $xbtn down=$down failed: $t")
+            }
+        }
     }
 
     override fun mouseWheel(delta: Int, x: Int, y: Int) {
@@ -302,6 +323,15 @@ class X11WindowContent(context: Context) :
                     return false
                 }
                 val evType = if (down) 2 else 3 // KeyPress / KeyRelease
+                // B-140: if the key we are about to press is still held, an earlier synthetic
+                // KeyRelease was dropped by this Xvfb. The press would then be a repeat the
+                // client may swallow (npp15ok -> np15ok) or the key would flood. Release it
+                // first so the client sees a fresh key.
+                if (X11KeyGate.releaseBeforePress(down, pressedKeys.contains(kc.first))) {
+                    client.fakeKey(3, kc.first)
+                    pressedKeys.remove(kc.first)
+                    P7Log.say(context, "P7X11 release-before-press code=${kc.first}")
+                }
                 // Press Ctrl before the key on the way down, release the key before Ctrl on the
                 // way up. The PC sends the modifier both as its own key event (dropped: no
                 // keysym) and as meta on the character event, which is what carries it here.
@@ -316,7 +346,22 @@ class X11WindowContent(context: Context) :
                     pressedKeys.add(client.shiftCode)
                 }
                 client.fakeKey(evType, kc.first)
-                if (down) pressedKeys.add(kc.first) else pressedKeys.remove(kc.first)
+                if (down) {
+                    pressedKeys.add(kc.first)
+                } else {
+                    pressedKeys.remove(kc.first)
+                    // B-140: confirm the key really went up. A dropped release leaves the key
+                    // down; the next press is then treated as an auto-repeat (lost character)
+                    // or auto-repeats forever. One QueryKeymap round trip per release is cheap
+                    // on the local socket and turns a silent lost key into a retried release.
+                    var retries = 0
+                    while (retries < 2 && X11KeyGate.needsAnotherRelease(
+                            client.keymap().let { it.size > kc.first && it[kc.first] })) {
+                        client.fakeKey(3, kc.first)
+                        retries++
+                    }
+                    if (retries > 0) P7Log.say(context, "P7X11 release retry code=${kc.first} tries=$retries")
+                }
                 if (!down && kc.second) {
                     client.fakeKey(evType, client.shiftCode)
                     pressedKeys.remove(client.shiftCode)

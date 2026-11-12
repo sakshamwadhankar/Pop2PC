@@ -98,6 +98,8 @@ class Phase4LinkService : Service() {
         private var nsdManager: NsdManager? = null
         private var nsdListener: NsdManager.RegistrationListener? = null
         private val pendingPairing = AtomicReference<Pairing?>(null)
+        /** Audit B-144: prompt rate limit for unauthenticated pairing attempts. */
+        @Volatile private var pairingThrottle = PairingThrottle.initial()
         private val liveSessions = java.util.concurrent.ConcurrentHashMap.newKeySet<LiveSession>()
         private val sessionIds = AtomicLong(0)
         /** elapsedRealtime when the current PC became paired; 0 while not connected. */
@@ -130,6 +132,9 @@ class Phase4LinkService : Service() {
 
         /** Latest state line, for the harness STATUS action. */
         @Synchronized fun stateLine(): String = lastState.get()
+
+        /** T15-4 item 2: the in-memory log ring; flushed in bulk at session end. */
+        internal val sayRing = SayRing()
 
         @Synchronized fun isRunning(): Boolean = running.get()
 
@@ -166,12 +171,20 @@ class Phase4LinkService : Service() {
             }
         }
 
-        /** A plain, user-safe failure line for the home screen, or null. */
-        fun lastFailure(): String? = lastState.get().let { s ->
-            if (s.contains("FAIL", ignoreCase = true) || s.contains("refused", ignoreCase = true)) {
-                "The connection stopped unexpectedly. Try again."
-            } else null
-        }
+    /** A plain, user-safe failure line for the home screen, or null. */
+    fun lastFailure(): String? = lastState.get().let { s ->
+        if (s.contains("FAIL", ignoreCase = true) || s.contains("refused", ignoreCase = true)) {
+            "The connection stopped unexpectedly. Try again."
+        } else null
+    }
+
+    /**
+     * Audit B-142 (pure): should a forget with [fprPrefix] ("" = forget-all) cut the
+     * live session whose stored fingerprint is [sessionFpr]? Case-insensitive, matching
+     * the trust store's uppercase-prefix forget rule.
+     */
+    fun forgetShouldClose(fprPrefix: String, sessionFpr: String): Boolean =
+        sessionFpr.startsWith(fprPrefix.uppercase())
     }
 
     /**
@@ -233,7 +246,18 @@ class Phase4LinkService : Service() {
                     for (r in rows) if (Phase4Crypto.trustedForget(this, r.first.take(3))) c++
                     c
                 } else if (Phase4Crypto.trustedForget(this, fpr)) 1 else 0
-                say("FORGET count=$n prefixOrEmpty=${fpr.take(6)} pins=${Phase4Crypto.trustedList(this).size}")
+                // Audit B-142: forgetting must also cut the live connection (the contract
+                // Phase4Crypto documents). An unpinned-but-connected PC kept a fully open
+                // gate until its socket died on its own.
+                var closed = 0
+                val pfx = fpr.uppercase()
+                for (s in liveSessions) {
+                    if (forgetShouldClose(pfx, s.fingerprintHex)) {
+                        forceClose(s, "forgotten")
+                        closed++
+                    }
+                }
+                say("FORGET count=$n closed=$closed prefixOrEmpty=${fpr.take(6)} pins=${Phase4Crypto.trustedList(this).size}")
             }
             ACTION_ACCESSORY -> adoptAccessory(intent)
             ACTION_P5TEST -> Thread({ p5SelfTest(intent.getIntExtra("seconds", 10)) }, "p5-selftest").start()
@@ -300,10 +324,13 @@ class Phase4LinkService : Service() {
         val pm = getSystemService(PowerManager::class.java)
         val info = ActivityManager.MemoryInfo()
         var lastLoggedOverride: Int? = null
+        // Audit A-21: consecutive healthy samples before the ladder walks back one rung.
+        var healthyStreak = 0
         while (running.get()) {
             try {
                 if (currentLive == null && !desktopRuntime.isUp()) {
                     governorStage = Phase10GovernorStage.NORMAL
+                    healthyStreak = 0
                     Thread.sleep(2_000L)
                     continue
                 }
@@ -321,12 +348,26 @@ class Phase4LinkService : Service() {
                         debugThermalOverride,
                     ),
                     desktopVisible = desktopRuntime.isUp(),
+                    planFps = QualityPref.plan(this).fps,
                 )
                 val d = Phase10Governor.next(governorStage, input)
                 if (d.action !is Phase10GovernorAction.None) {
                     governorStage = d.next
+                    healthyStreak = 0
                     applyGovernor(d, input)
-                }
+                } else if (Phase10Governor.pressure(input) == null) {
+                    healthyStreak++
+                    // Audit A-21: undo one ladder rung after RECOVERY_STREAK calm samples
+                    // (about 10 s) so a hot spell does not keep the session slow forever.
+                    if (healthyStreak >= Phase10Governor.RECOVERY_STREAK) {
+                        val r = Phase10Governor.recover(governorStage, input.planFps)
+                        if (r != null && r.action !is Phase10GovernorAction.None) {
+                            governorStage = r.next
+                            healthyStreak = 0
+                            applyGovernor(r, input)
+                        }
+                    }
+                } else healthyStreak = 0
             } catch (t: Throwable) {
                 say("GOVERNOR sample failed ${t.javaClass.simpleName}: ${t.message}")
             }
@@ -347,16 +388,72 @@ class Phase4LinkService : Service() {
             is Phase10GovernorAction.SetFps -> s?.setTargetFps(action.fps)
             Phase10GovernorAction.LowerResolution -> s?.governorLowerResolution()
             Phase10GovernorAction.WarnPc -> s?.governorWarnPc(decision.trigger)
+            Phase10GovernorAction.RestoreResolution -> s?.governorRestoreResolution()
+            Phase10GovernorAction.ResumeHiddenWindows -> s?.shell()?.resumeHiddenWindows()
             Phase10GovernorAction.None -> Unit
         }
     }
 
     private fun say(line: String) {
         Log.i(TAG, line)
-        val f = File("${filesDir}/p4")
-        f.mkdirs()
-        File(f, "p4.log").appendText("${System.currentTimeMillis()} $line\n")
         lastState.set(line)
+        // T15-4 item 2 (B-139b, manager design): no disk I/O on the hot path at all - every
+        // line lands in the in-memory ring and is flushed in one bulk write at session end
+        // (debug builds also flush every FLUSH_EVERY lines for crash evidence).
+        val periodic = sayRing.add(line, System.currentTimeMillis())
+        if (BuildConfig.DEBUG && (periodic || sayRing.atCapacity)) flushRing("periodic")
+    }
+
+    /** One bulk write of the ring to files/p4/p4.log (session end / periodic debug flush). */
+    private fun flushRing(why: String) {
+        try {
+            val f = File("${filesDir}/p4")
+            f.mkdirs()
+            val text = sayRing.drain()
+            if (text.isNotEmpty()) File(f, "p4.log").appendText(text)
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * Audit B-141b / T15-4 item 4: Android 15 stops a `dataSync` foreground service after
+     * 6 h per 24 h and calls this a few seconds before killing it (the `connectedDevice`
+     * primary type has no such limit; this only fires on phones where the fallback
+     * engaged). The pure ladder in [FgsTimeout] picks the recovery type: connectedDevice
+     * if it ever worked here, else mediaProjection while desktop audio is being captured,
+     * else the honest "Session paused" notification (a tap reopens the app; the desktop
+     * runtime survives via Phase10Runtime). FGS types are documented on the manifest
+     * service entry: connectedDevice | dataSync | mediaProjection.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        super.onTimeout(startId, fgsType)
+        val type = FgsTimeout.recoveryType(
+            connectedDeviceWorkedBefore =
+                foregroundBaseType != ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            captureActive = Phase11Audio.isActive(),
+            connectedDevice = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            mediaProjection = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+        )
+        say("FGS onTimeout type=$fgsType -> recovery=${type ?: "notify-only"}")
+        val n = buildNotification(
+            if (type == null) "Session paused by Android" else "Continuing after Android timeout",
+            if (type == null) "Reopen PopToPC (or restart the PC app) to continue the session."
+            else "The desktop session continues; if it drops, reopen PopToPC.",
+            false,
+            withStop = true,
+        )
+        if (type == null) {
+            try { getSystemService(NotificationManager::class.java).notify(47613, n) } catch (_: Throwable) {}
+            return
+        }
+        try {
+            startForeground(47600, n, type)
+            if (type == ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) {
+                foregroundBaseType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
+            say("FGS re-promoted type=$type after onTimeout")
+        } catch (t: Throwable) {
+            say("FGS re-promote failed ${t.javaClass.simpleName}; session will end with the service")
+        }
     }
 
     /** AOA hand-off: the attach path (activity or permission receiver) sends the open FD. */
@@ -452,10 +549,11 @@ class Phase4LinkService : Service() {
         currentLive = null
         connectedSince.set(0)
         Phase11Clip.stop(this)
-        Phase11Audio.unbindSink("service stop")
+        Phase11Audio.unbindSink(null, "service stop")
         desktopRuntime.stop()
         Phase5Dispatch.bind(null)
         releaseSessionWakeLock("service stop")
+        flushRing("service stop")
         stopSelf()
     }
 
@@ -544,11 +642,25 @@ class Phase4LinkService : Service() {
     private fun ensureIdentity() {
         val dir = File("${filesDir}/p4").apply { mkdirs() }
         val cert = File(dir, "phone-cert.der")
-        val key = File(dir, "phone-key.pkcs8.b64")
-        if (cert.exists() && key.exists()) return
+        val legacyKey = File(dir, "phone-key.pkcs8.b64")
+        val ksMarker = File(dir, "phone-key.keystore")
+        if (cert.exists() && (legacyKey.exists() || ksMarker.exists())) return
+        // Audit A-92: new identities are generated INSIDE AndroidKeyStore (non-exportable
+        // private key). Existing identities keep their legacy file key so pins never break;
+        // they migrate only when the user forgets/repairs deliberately.
+        try {
+            val kp = Phase4Crypto.generateKeystoreIdentity(Phase4Crypto.KEYSTORE_ALIAS)
+            cert.writeBytes(kp.certDer())
+            ksMarker.writeText("keystore-alias=${Phase4Crypto.KEYSTORE_ALIAS}\n")
+            say("IDENTITY generated (AndroidKeyStore) fpr=${Phase4Crypto.sha256(kp.certDer()).joinToString("") { "%02X".format(it) }.take(16)}")
+            return
+        } catch (t: Throwable) {
+            say("IDENTITY keystore unavailable ${t.javaClass.simpleName}: ${t.message} - legacy file key")
+        }
         val id = Phase4Crypto.generatePhoneIdentity()
         cert.writeBytes(id.certDer())
-        key.writeText(Base64.getEncoder().encodeToString(id.keyPair.private.encoded))
+        legacyKey.writeText(Base64.getEncoder().encodeToString(id.keyPair.private.encoded))
+        ksMarker.delete()
         say("IDENTITY generated fpr=${Phase4Crypto.sha256(id.certDer()).joinToString("") { "%02X".format(it) }.take(16)}")
     }
 
@@ -556,9 +668,15 @@ class Phase4LinkService : Service() {
         val dir = File("${filesDir}/p4")
         val cert = File(dir, "phone-cert.der")
         val key = File(dir, "phone-key.pkcs8.b64")
-        if (!cert.exists() || !key.exists()) ensureIdentity()
+        val ksMarker = File(dir, "phone-key.keystore")
+        if (!cert.exists() || (!key.exists() && !ksMarker.exists())) ensureIdentity()
         val kf = CertificateFactory.getInstance("X.509")
             .generateCertificate(cert.inputStream()) as X509Certificate
+        if (ksMarker.exists()) {
+            val priv = Phase4Crypto.keystorePrivateKey(Phase4Crypto.KEYSTORE_ALIAS)
+                ?: throw IllegalStateException("AndroidKeyStore lost the identity key")
+            return Pair(kf, priv)
+        }
         val keyDer = Base64.getDecoder().decode(key.readText())
         val spec = java.security.spec.PKCS8EncodedKeySpec(keyDer)
         return Pair(kf, java.security.KeyFactory.getInstance("EC").generatePrivate(spec))
@@ -667,6 +785,16 @@ class Phase4LinkService : Service() {
         var decisionPending: Pairing? = null
         var pairCode: String? = null
         if (!paired) {
+            // Audit B-144: a host that can reach the port can pop the pairing prompt at
+            // will; throttle unauthenticated prompt attempts (the trusted reconnect path
+            // never prompts, so real users are unaffected).
+            val (throttled, allowed) = PairingThrottle.allow(pairingThrottle, SystemClock.elapsedRealtime())
+            pairingThrottle = throttled
+            if (!allowed) {
+                say("PAIRING throttled (${PairingThrottle.MAX_PROMPTS}/${PairingThrottle.WINDOW_MS / 1000}s) - closing ${clientFpr.take(16)}")
+                try { sock.close() } catch (_: Throwable) {}
+                return
+            }
             val code = Phase4Crypto.pairingCode(identityCert().encoded, client.encoded)
             pairCode = code
             val p = Pairing(code, clientFpr)
@@ -713,8 +841,9 @@ class Phase4LinkService : Service() {
         val p5 = Phase5Session(this, output, { line -> say(line) })
         currentPhase5 = p5
         // Phase 11 D-d: this session can send files to the PC, and incoming files land in
-        // files/desktop (verified before the .part file is renamed).
-        val fileSink = Phase11Files.Sink(Phase11Files.desktopDir(this))
+        // files/desktop (verified before the .part file is renamed). T15-3: an import-flagged
+        // transfer lands in files/desktop/Imported and is registered in the imported list.
+        val fileSink = Phase11Files.Sink(Phase11Files.desktopDir(this), ImportedApps.dir(this))
         Phase11Files.bindSender { bytes ->
             p5.writer.push(Phase4Protocol.Message.create(Phase4Protocol.CH_FILE, bytes))
         }
@@ -733,7 +862,9 @@ class Phase4LinkService : Service() {
             p5.sendControl("pair $pairCode")
         }
         // Phase 11 D-b: phone sound -> PC on CH_AUDIO, only while this session is live.
-        Phase11Audio.bindSink { bytes ->
+        // Audit B-143: the session identity guards the teardown (the old session's finally
+        // block can no longer stop the capture this session just bound).
+        Phase11Audio.bindSink(live) { bytes ->
             p5.writer.push(Phase4Protocol.Message.create(Phase4Protocol.CH_AUDIO, bytes))
         }
         var camDropped = 0
@@ -840,6 +971,16 @@ class Phase4LinkService : Service() {
                             // until Yes: the PC waits for pair-ok before asking for video.
                             val controlText = String(m.payload, Charsets.UTF_8)
                             if (Phase4RePair.wanted(paired, decisionPending != null, controlText)) {
+                                // Audit B-144: the same throttle covers the mid-session
+                                // re-pair prompt (B-126), so a forgotten PC cannot spam it.
+                                val (rthrottle, rallowed) = PairingThrottle.allow(
+                                    pairingThrottle, SystemClock.elapsedRealtime(),
+                                )
+                                pairingThrottle = rthrottle
+                                if (!rallowed) {
+                                    say("PAIRING throttled (re-pair) - ignoring pair-request from ${clientFpr.take(16)}")
+                                    continue
+                                }
                                 val code = Phase4Crypto.pairingCode(identityCert().encoded, client.encoded)
                                 val p = Pairing(code, clientFpr)
                                 if (pendingPairing.compareAndSet(null, p)) {
@@ -888,9 +1029,19 @@ class Phase4LinkService : Service() {
                             try {
                                 val saved = fileSink.onMessage(m.payload)
                                 if (saved != null) {
-                                    say("P11FILE saved ${saved.name} ${saved.length()} B sha256=" +
-                                        Phase11Files.sha256(saved).joinToString("") { "%02x".format(it) }.take(16))
-                                    p5.shell()?.toast(Toasts.fileReceived(saved.name))
+                                    if (saved.kind == Phase11Files.KIND_IMPORT) {
+                                        // T15-3: the PC's "Import app" button. Stage it as an
+                                        // import (sha recorded, duplicate collapsed) and tell
+                                        // the user; the start menu's Imported section refreshes.
+                                        val r = ImportedApps.stage(this, saved.file, "pc")
+                                        say("IMPORT from pc ${saved.file.name} -> ${r.message}")
+                                        p5.shell()?.toast(r.message)
+                                        p5.shell()?.refreshInstalledRows()
+                                    } else {
+                                        say("P11FILE saved ${saved.file.name} ${saved.file.length()} B sha256=" +
+                                            Phase11Files.sha256(saved.file).joinToString("") { "%02x".format(it) }.take(16))
+                                        p5.shell()?.toast(Toasts.fileReceived(saved.file.name))
+                                    }
                                 }
                             } catch (t: Throwable) {
                                 say("P11FILE failed ${t.javaClass.simpleName}: ${t.message}")
@@ -905,7 +1056,9 @@ class Phase4LinkService : Service() {
         } finally {
             if (!stopping) p5.shell()?.toast(Toasts.LINK_LOST)
             p5.stop(if (stopping) "service stop" else "link lost")
-            Phase11Audio.unbindSink(if (stopping) "service stop" else "session end")
+            // Audit B-143: pass the owner; a replaced (reconnect) session's teardown cannot
+            // unbind the new session's audio capture. Service stop passes null (always ends).
+            Phase11Audio.unbindSink(if (stopping) null else live, if (stopping) "service stop" else "session end")
             // B-131: every session-end path (clean exit, link death, session exception)
             // restores the pre-session media volume. Service stop also lands here (the
             // stop path joins the pump), so Stop link un-mutes too.
@@ -932,6 +1085,9 @@ class Phase4LinkService : Service() {
                 pendingPairing.compareAndSet(p, null)
                 cancelPairingNotification()
             }
+            // T15-4 item 2: one bulk ring flush per session end - the evidence the phone
+            // rounds read via run-as lands here, with zero per-line disk I/O in between.
+            flushRing("session end")
             try { sock.close() } catch (_: Throwable) {}
         }
     }

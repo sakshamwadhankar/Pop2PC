@@ -9,21 +9,28 @@ import java.util.concurrent.atomic.AtomicInteger
  * Phase 11 D-d: file transfer over CH_FILE, phone half. The wire format is the mirror of
  * pc/udreceiver/src/files.rs:
  *
- *   START: [1][u32 id][u64 size][u16 nameLen][name][32-byte SHA-256]
+ *   START: [1][u32 id][u64 size][u16 nameLen][name][32-byte SHA-256][u8 kind]
  *   DATA:  [2][u32 id][bytes]      (at most 65528 bytes, so one DATA is one wire frame)
  *   END:   [3][u32 id]
  *
- * Incoming files land in <filesDir>/desktop (the Files app's folder); outgoing files are
- * chosen in the Files window ("Send to PC"). A .part file is verified before it is
+ * The kind byte is the T15-3 import flag (0 = ordinary file, 1 = imported app); receivers
+ * accept the old shorter START and treat it as kind 0. Incoming files land in
+ * <filesDir>/desktop (the Files app's folder) or, for imports, in desktop/Imported; outgoing
+ * files are chosen in the Files window ("Send to PC"). A .part file is verified before it is
  * renamed, so a broken transfer never leaves a half file under the real name.
  */
 object Phase11Files {
     const val MAX_DATA = 65536 - 8
+
+    /** START kinds: an ordinary file, or an app the user imported (T15-3). */
+    const val KIND_FILE = 0
+    const val KIND_IMPORT = 1
+
     private val nextId = AtomicInteger(1)
 
-    fun encodeStart(id: Int, size: Long, name: String, sha: ByteArray): ByteArray {
+    fun encodeStart(id: Int, size: Long, name: String, sha: ByteArray, kind: Int = KIND_FILE): ByteArray {
         val n = name.toByteArray(Charsets.UTF_8)
-        val out = ByteArray(1 + 4 + 8 + 2 + n.size + 32)
+        val out = ByteArray(1 + 4 + 8 + 2 + n.size + 32 + 1)
         out[0] = 1
         putInt(out, 1, id)
         putLong(out, 5, size)
@@ -31,6 +38,7 @@ object Phase11Files {
         out[14] = (n.size and 0xFF).toByte()
         System.arraycopy(n, 0, out, 15, n.size)
         System.arraycopy(sha, 0, out, 15 + n.size, 32)
+        out[15 + n.size + 32] = kind.toByte()
         return out
     }
 
@@ -104,16 +112,24 @@ object Phase11Files {
     }
 
     /** One incoming transfer at a time; returns the saved file on a verified END. */
-    class Sink(private val dir: File) {
+    class Sink(
+        private val dir: File,
+        /** Where a kind=IMPORT transfer lands (T15-3); defaults to [dir]. */
+        private val importDir: File = dir,
+    ) {
+        /** A verified incoming file plus what it is (KIND_FILE / KIND_IMPORT). */
+        data class Received(val file: File, val kind: Int)
+
         private var id = 0
         private var size = 0L
         private var name = ""
         private var sha: ByteArray = ByteArray(32)
+        private var kind = KIND_FILE
         private var part: File? = null
         private var md: MessageDigest? = null
         private var got = 0L
 
-        fun onMessage(msg: ByteArray): File? {
+        fun onMessage(msg: ByteArray): Received? {
             if (msg.size < 5) throw IllegalArgumentException("short file message")
             val mid = getInt(msg, 1)
             when (msg[0].toInt()) {
@@ -122,9 +138,12 @@ object Phase11Files {
                     val nl = ((msg[13].toInt() and 0xFF) shl 8) or (msg[14].toInt() and 0xFF)
                     name = safeName(String(msg, 15, nl, Charsets.UTF_8))
                     sha = msg.copyOfRange(15 + nl, 15 + nl + 32)
+                    val kindAt = 15 + nl + 32
+                    kind = if (msg.size > kindAt) msg[kindAt].toInt() and 0xFF else KIND_FILE
                     id = mid
-                    dir.mkdirs()
-                    part = File(dir, ".$id.part")
+                    val target = if (kind == KIND_IMPORT) importDir else dir
+                    target.mkdirs()
+                    part = File(target, ".$id.part")
                     md = MessageDigest.getInstance("SHA-256")
                     got = 0
                     part!!.outputStream().use { }
@@ -148,9 +167,10 @@ object Phase11Files {
                         p.delete()
                         throw IllegalStateException("verify failed: $got / $size bytes")
                     }
-                    val finalFile = uniqueFile(dir, name)
+                    val target = if (kind == KIND_IMPORT) importDir else dir
+                    val finalFile = uniqueFile(target, name)
                     if (!p.renameTo(finalFile)) throw IllegalStateException("rename failed")
-                    return finalFile
+                    return Received(finalFile, kind)
                 }
                 else -> throw IllegalArgumentException("unknown file message ${msg[0]}")
             }

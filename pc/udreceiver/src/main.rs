@@ -475,7 +475,8 @@ fn cmd_view(rest: &[String]) -> ExitCode {
     }
 }
 
-fn cmd_trust(rest: &[String]) -> ExitCode {    let store = TrustedPhoneStore::open();
+fn cmd_trust(rest: &[String]) -> ExitCode {
+    let store = TrustedPhoneStore::open();
     match rest.first().map(|s| s.as_str()) {
         Some("list") => {
             let rows = store.entries();

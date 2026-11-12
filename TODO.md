@@ -1,4 +1,4 @@
-T15-2B: COMPLETE 2026-11-09 00:56. B-008 (b) proven impossible live; (a) measured FAIL (home-to-front stops the guest, PC black at +8 s/+20 s) -> B008Policy.HOME_TO_FRONT=false, no-move guard stays, B-008 OPEN. Gates: Android 316/0/3, cargo 103/0, clippy 0, diff-check 0, AAB 171,994,838 B. Report: Temp\opencode\t15-2\RESULT.txt.
+T15-4: done 5 of 6. Updated 03:00. Now: STOPPED - ABR A/B + item-2 typing tables owed (owner actively on PC every retry; recipe in Temp/opencode/t15-4). Code+proofs+AAB done.
 
 # Night run: Phase 12 finish + Phase 13 polish
 

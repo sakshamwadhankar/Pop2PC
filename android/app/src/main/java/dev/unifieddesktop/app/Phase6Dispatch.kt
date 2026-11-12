@@ -100,6 +100,32 @@ object Phase6Dispatch {
             "rects" -> s.model.all().joinToString(" ") { w ->
                 "id=${w.id} title=\"${w.title}\" rect=${w.rect().joinToString(",")} focused=${w.id == s.model.focusedId}"
             }
+            // T15-3 import harness: list / fetch a URL / launch, so the phone proofs can drive
+            // the same code the UI buttons call.
+            "imports" -> ImportedApps.read(ctx).joinToString(" | ") { e ->
+                "${e.name} kind=${e.kind} sha=${e.sha256.take(12)} file=${e.file} exe=${e.exe} src=${e.source}"
+            }.ifEmpty { "(none)" }
+            "importurl" -> {
+                val u = arg.trim()
+                Thread {
+                    val r = ImportedApps.importFromUrl(ctx, u) { line -> P7Log.say(ctx, "IMPORT $line") }
+                    P7Log.say(ctx, "IMPORT cmd url -> ${r.message}")
+                }.start()
+                "importing $u"
+            }
+            "importlaunch" -> {
+                val e = ImportedApps.read(ctx).firstOrNull {
+                    it.name.equals(arg.trim(), ignoreCase = true) || it.sha256.startsWith(arg.trim())
+                }
+                if (e == null) "no import [${arg.trim()}]" else s.launchImported(e)
+            }
+            "importpick" -> {
+                val ok = Phase5Dispatch.session()?.sendControl("import-pick") == true
+                "import-pick sent=$ok"
+            }
+            "shortcuts" -> Phase2Wine.startMenuShortcuts(ctx).joinToString(" | ") { (n, f) ->
+                "$n -> ${f.name}"
+            }.ifEmpty { "(none)" }
             // B-083: fixed + real installed-app rows, and the shared launch route by id.
             "menurows" -> s.menuRows()
             "openid" -> s.openCatalogApp(arg.trim())

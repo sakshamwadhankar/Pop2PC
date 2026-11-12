@@ -420,7 +420,9 @@ object Phase2X11 {
         }.start()
         g3exe("XEYES", ctx, pidOf(pp))
         Thread { drain("XEYES_ERR", pp.errorStream) }.apply { name = "phase2-xeyes-err" }.start()
-        Thread.sleep(3000)
+        // Audit row 45: wait for the window to map (bounded, early exit) instead of a
+        // blind 3 s blocking sleep on the caller thread.
+        waitForCatalogWindow(ctx, "xeyes", 3000)
         say("APPCTR xeyes started pid=${pidOf(pp)}")
         placeWindows()
         writeLog(ctx)
@@ -449,7 +451,7 @@ object Phase2X11 {
         }.start()
         g3exe("XCALC", ctx, pidOf(pp))
         Thread { drain("XCALC_ERR", pp.errorStream) }.apply { name = "phase2-xcalc-err" }.start()
-        Thread.sleep(3000)
+        waitForCatalogWindow(ctx, "xcalc", 3000)
         say("APPCTR xcalc started pid=${pidOf(pp)}")
         placeWindows()
         writeLog(ctx)
@@ -468,7 +470,7 @@ object Phase2X11 {
         }.start()
         g3exe("XMESSAGE", ctx, pidOf(pp))
         Thread { drain("XMESSAGE_ERR", pp.errorStream) }.apply { name = "phase2-xmessage-err" }.start()
-        Thread.sleep(3000)
+        waitForCatalogWindow(ctx, "xmessage", 3000)
         say("APPCTR xmessage started pid=${pidOf(pp)}")
         placeWindows()
         writeLog(ctx)
@@ -567,6 +569,20 @@ object Phase2X11 {
                 x.handshake()
                 return x
             }
+
+            /**
+             * B-140: parse the 32-byte core keymap of a QueryKeymap reply into a
+             * 256-entry table; bit n of the map = keycode n is currently down. Pure so the
+             * JVM test can pin the wire layout without an X server.
+             */
+            fun parseKeymap(map: ByteArray): BooleanArray {
+                val bits = BooleanArray(256)
+                for (i in 0 until minOf(32, map.size)) {
+                    val v = map[i].toInt() and 0xff
+                    for (b in 0..7) bits[i * 8 + b] = (v and (1 shl b)) != 0
+                }
+                return bits
+            }
         }
 
         private fun put(b: Int) = out.write(b and 0xff)
@@ -632,8 +648,24 @@ object Phase2X11 {
 
         private var lastImage: ByteArray? = null
 
+        /**
+         * Audit B-140b: every GetImage reply lands in this ONE reusable buffer instead of a
+         * fresh ~3.7 MB allocation per grab (the old code allocated even for unchanged
+         * grabs, which poll at 8-120 ms). The owned [lastImage] copy is taken only when the
+         * picture actually changed, and the two preallocated bitmaps alternate so the frame
+         * loop never mutates the bitmap the shell is showing.
+         */
+        private var scratch = ByteArray(0)
+
+        /** Two reused ARGB bitmaps the shell alternates between (never mutated while shown). */
+        private var bmpFlip = false
+        private var bmpA: Bitmap? = null
+        private var bmpB: Bitmap? = null
+        private var paintBuf: java.nio.IntBuffer? = null
+
         fun getImage(): Bitmap {
-            val data = readImage()
+            val len = readImage()
+            val data = scratch.copyOf(len)
             lastImage = data
             return imageToBitmap(data)
         }
@@ -644,16 +676,20 @@ object Phase2X11 {
          * skipping it for an unchanged picture is what makes it affordable for the X11 frame
          * loop to poll every few ms after a key (typing echo) while still never pushing an
          * identical frame into the video encoder (which delayed the urgent input frame by
-         * ~35 ms: measured 2026-10-23, Notepad++ typing 105-109 ms).
+         * ~35 ms: measured 2026-10-23, Notepad++ typing 105-109 ms). Since the audit, an
+         * unchanged grab also allocates NOTHING (the reply reuses the scratch buffer and the
+         * compare walks it in place).
          */
         fun getImageIfChanged(): Bitmap? {
-            val data = readImage()
-            if (x11ImageUnchanged(lastImage, data)) return null
+            val len = readImage()
+            if (x11ImageUnchangedLen(lastImage, scratch, len)) return null
+            val data = scratch.copyOf(len)
             lastImage = data
             return imageToBitmap(data)
         }
 
-        private fun readImage(): ByteArray {
+        /** Read the root picture into the reusable scratch buffer; returns the reply length. */
+        private fun readImage(): Int {
             probeFocus()
             put(OP_GET_IMAGE); put(2); putShort(5)
             putInt(root); putShort(0); putShort(0); putShort(width); putShort(height)
@@ -667,20 +703,49 @@ object Phase2X11 {
             val depth = rep[1].toInt() and 0xff
             val len = ByteBuffer.wrap(rep, 4, 4).order(ByteOrder.LITTLE_ENDIAN).int * 4
             require(depth == 24 && len == width * height * 4) { "unexpected image depth=$depth len=$len" }
-            return readFully(len)
+            if (scratch.size < len) scratch = ByteArray(len)
+            readFully(scratch, len)
+            return len
         }
 
+        /**
+         * Build the shell bitmap from the first [len] bytes of BGRX image data, into one of
+         * two reused bitmaps (flip on every changed frame) through a reused IntBuffer —
+         * the old path allocated an IntArray + a fresh Bitmap (~7.4 MB) per changed frame.
+         */
         private fun imageToBitmap(data: ByteArray): Bitmap {
-            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val px = IntArray(width * height)
+            var bmp = if (bmpFlip) bmpA else bmpB
+            if (bmp == null || bmp.width != width || bmp.height != height) {
+                bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                if (bmpFlip) bmpA = bmp else bmpB = bmp
+                paintBuf = null
+            }
+            var buf = paintBuf
+            if (buf == null || buf.capacity() != width * height) {
+                buf = java.nio.IntBuffer.allocate(width * height)
+                paintBuf = buf
+            }
+            buf.rewind()
+            val px = buf.array()
             for (i in px.indices) {
                 px[i] = 0xFF000000.toInt() or
                     ((data[i * 4 + 2].toInt() and 0xff) shl 16) or // R
                     ((data[i * 4 + 1].toInt() and 0xff) shl 8) or  // G
                     (data[i * 4].toInt() and 0xff)                 // B
             }
-            bmp.setPixels(px, 0, width, 0, 0, width, height)
+            buf.position(0)
+            bmp.copyPixelsFromBuffer(buf)
+            bmpFlip = !bmpFlip
             return bmp
+        }
+
+        private fun readFully(dst: ByteArray, len: Int) {
+            var off = 0
+            while (off < len) {
+                val n = ins.read(dst, off, len - off)
+                require(n > 0) { "X11 stream closed at $off/$len" }
+                off += n
+            }
         }
 
         // ---------------- XTEST ----------------
@@ -741,6 +806,22 @@ object Phase2X11 {
 
         fun keyEvent(down: Boolean, keycode: Int) {
             fakeInput(if (down) 2 else 3 /* KeyPress / KeyRelease */, keycode)
+        }
+
+        /**
+         * B-140: X_QueryKeymap (op 44). The core reply carries 32 bytes of key state after
+         * its 8-byte header, so the server answers 40 bytes (`length` = 2 words). Used to
+         * catch a synthetic KeyRelease the server dropped: the key stays down, the client
+         * treats the next press as an auto-repeat, and the character is lost (the
+         * npp15ok -> np15ok case) or the key floods (B-077 family).
+         */
+        fun keymap(): BooleanArray {
+            put(44); put(0); putShort(1)
+            out.flush()
+            val head = readFully(32)
+            require(head[0].toInt() and 0xff == 1) { "QueryKeymap failed type=${head[0]}" }
+            val words = (head[4].toInt() and 0xff) or ((head[5].toInt() and 0xff) shl 8)
+            return parseKeymap(readFully(words * 4))
         }
 
         fun keycodeFor(keys: Int): Pair<Int, Boolean>? {

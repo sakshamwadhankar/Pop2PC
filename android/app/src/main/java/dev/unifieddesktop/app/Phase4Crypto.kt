@@ -136,6 +136,41 @@ object Phase4Crypto {
         return PhoneIdentity(kp, cert)
     }
 
+    /**
+     * Audit A-92: a hardware-backed identity. The private key is generated INSIDE
+     * AndroidKeyStore and can never be exported; only the certificate leaves. Throws when
+     * the platform has no usable keystore (the caller falls back to the legacy file key).
+     */
+    const val KEYSTORE_ALIAS = "ud-phone-identity"
+
+    fun generateKeystoreIdentity(alias: String = KEYSTORE_ALIAS): PhoneIdentity {
+        val kpg = java.security.KeyPairGenerator.getInstance(
+            android.security.keystore.KeyProperties.KEY_ALGORITHM_EC,
+            "AndroidKeyStore",
+        )
+        kpg.initialize(
+            android.security.keystore.KeyGenParameterSpec.Builder(
+                alias,
+                android.security.keystore.KeyProperties.PURPOSE_SIGN or
+                    android.security.keystore.KeyProperties.PURPOSE_VERIFY,
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                .setDigests(android.security.keystore.KeyProperties.DIGEST_SHA256)
+                .build()
+        )
+        val kp = kpg.generateKeyPair()
+        val cert = selfSignedCertificate(kp, ekuServerAuth = true, ekuClientAuth = true)
+        return PhoneIdentity(kp, cert)
+    }
+
+    /** The AndroidKeyStore private key, or null when the keystore lost it. */
+    fun keystorePrivateKey(alias: String = KEYSTORE_ALIAS): java.security.PrivateKey? = try {
+        val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        ks.getKey(alias, null) as? java.security.PrivateKey
+    } catch (_: Throwable) {
+        null
+    }
+
     fun selfSignedCertificate(
         kp: java.security.KeyPair,
         ekuServerAuth: Boolean,
@@ -221,8 +256,20 @@ object Phase4Crypto {
 
     fun trustRows(f: File): List<Triple<String, String, String>> {
         if (!f.exists()) return emptyList()
-        return f.readLines().filter { it.isNotBlank() }.map { line ->
-            Triple(jsonField(line, "fpr"), jsonField(line, "label"), jsonField(line, "added"))
+        // Audit A-11: parse with org.json instead of the naive quote scan, so a label with
+        // an escaped quote can no longer corrupt the row. A malformed line is skipped, not
+        // fatal (the store is user-repairable by re-pairing).
+        return f.readLines().filter { it.isNotBlank() }.mapNotNull { line ->
+            try {
+                val o = org.json.JSONObject(line)
+                Triple(
+                    o.optString("fpr", ""),
+                    o.optString("label", ""),
+                    o.optString("added", ""),
+                )
+            } catch (_: Throwable) {
+                null
+            }
         }
     }
 
@@ -230,15 +277,31 @@ object Phase4Crypto {
     fun trustedList(ctx: android.content.Context): List<Triple<String, String, String>> =
         trustRows(trustedFile(ctx))
 
+    /** Atomic NDJSON write (tmp + rename); a crash mid-write can no longer truncate pins. */
+    private fun writeRows(f: File, rows: List<Triple<String, String, String>>) {
+        val tmp = File(f.parentFile, f.name + ".tmp")
+        tmp.bufferedWriter().use { w ->
+            for ((fr, l, a) in rows) {
+                val o = org.json.JSONObject()
+                o.put("fpr", fr)
+                o.put("label", l)
+                o.put("added", a)
+                w.write(o.toString())
+                w.write("\n")
+            }
+        }
+        if (!tmp.renameTo(f)) {
+            // Some filesystems refuse rename-over-existing; fall back to a direct write.
+            f.writeText(tmp.readText())
+            tmp.delete()
+        }
+    }
+
     fun trustRemember(f: File, fprHex: String, label: String) {
         val rows = trustRows(f).toMutableList()
         rows.removeAll { it.first == fprHex }
         rows.add(Triple(fprHex, label, (System.currentTimeMillis() / 1000).toString()))
-        f.bufferedWriter().use { w ->
-            for ((fr, l, a) in rows) {
-                w.write("{\"fpr\":\"$fr\",\"label\":\"${l.replace("\\", "\\\\").replace("\"", "\\\"")}\",\"added\":\"$a\"}\n")
-            }
-        }
+        writeRows(f, rows)
     }
 
     fun trustedRemember(ctx: android.content.Context, fprHex: String, label: String) =
@@ -249,11 +312,7 @@ object Phase4Crypto {
         val rows = trustRows(f)
         val kept = rows.filter { !it.first.startsWith(fprPrefix.uppercase()) }
         if (kept.size == rows.size) return false
-        f.bufferedWriter().use { w ->
-            for ((fr, l, a) in kept) {
-                w.write("{\"fpr\":\"$fr\",\"label\":\"${l.replace("\\", "\\\\").replace("\"", "\\\"")}\",\"added\":\"$a\"}\n")
-            }
-        }
+        writeRows(f, kept)
         return true
     }
 
@@ -262,13 +321,4 @@ object Phase4Crypto {
 
     fun trustedFind(ctx: android.content.Context, fprHex: String): Triple<String, String, String>? =
         trustedList(ctx).firstOrNull { it.first == fprHex }
-
-    private fun jsonField(line: String, key: String): String {
-        val needle = "\"$key\":\""
-        val i = line.indexOf(needle)
-        if (i < 0) return ""
-        val rest = line.substring(i + needle.length)
-        val end = rest.indexOf('"')
-        return if (end >= 0) rest.substring(0, end) else rest
-    }
 }

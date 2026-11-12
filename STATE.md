@@ -6,6 +6,41 @@ corrects it after review.
 
 ## Now
 
+- **2026-11-13 verification + bug-sweep round (PENDING MANAGER REVIEW), same session.** Every
+  change of the audit-fix round was re-verified: fresh gates Android **353/0/3** + lint +
+  assemble green, cargo **102/0 + lock_crash 1/0**, clippy 0; the riskiest diffs (X11 scratch
+  buffers, ABR wiring, FGS/forget/audio changes) re-read line by line. **B-107 FIXED** (the
+  flaky lock test now retries the session mutex for 5 s and uses a 10 s ready timeout;
+  previously-flaky test passed 5/5 consecutive runs). **B-151 triage recorded**: ~40 Open
+  rows verified already fixed/resolved in code (each with a file:line reference in the row),
+  so the tree and the tracker now agree; genuinely open and needing device work: B-124,
+  B-068, B-030, plus the B-150/B-149/B-139b/B-141b/B-140b live A/B recipes. Still owed:
+  phone/emulator verification of the B-008 translucent fix (owner was using the phone; host
+  RAM < 1 GB). Nothing committed (manager's job).
+- **2026-11-13, owner-directed audit-fix round (PENDING MANAGER REVIEW).** The owner asked to
+  fix every problem in `docs/ENGINEERING_AUDIT_2026-11-13.md` and to close B-008. Done, all
+  `code-only` verified this session: Android gate **353/0/3** + lint + assemble green; cargo
+  **103/0** + clippy 0. Fixed: B-138 (release harness export = RCE surface), B-139b (hot-path
+  logging incl. typed-text privacy leak + unbounded p4.log), B-140b part 1 (X11 scratch
+  buffer + reused bitmaps; XDamage full fix deferred), B-141b (dataSync FGS onTimeout),
+  B-142 (forget cuts live sessions), B-143 (audio unbind race), B-144 (pairing prompt
+  throttle 5/60 s), B-145 (cam leaks), B-146 (orphan .part), B-147 (X11 right/middle
+  click), B-148 (governor recovery ladder), B-149 (adaptive bitrate: PC now sends `vq`,
+  phone Phase5Abr drives runtime bitrate), B-150 = **B-008's fix: the guest window is now
+  TRANSLUCENT** (`GuestPresentationHost.beforeMainActivityOnCreate`: transparent background +
+  `setFormat(TRANSLUCENT)` + `setTranslucent(true)`, API-30-guarded) so the home behind
+  stays STARTED and the phone never composites black while the guest stays RESUMED and
+  keeps rendering; B008Policy records the decision (HOME_TO_FRONT stays OFF). Also fixed:
+  two pre-existing broken T15-3 test calls in files.rs (missing kind arg), plus repo
+  hygiene (`undefined/` removed from the tree and gitignored; `Modelfile`/`.freebuff/`
+  gitignored; keys now AndroidKeyStore-backed for NEW identities; trust store JSON via
+  org.json + atomic writes). NOT done: R8/minify (high-risk, needs device guest
+  regression), Baseline Profiles module, Choreographer pacing, XDamage, box64 per-app
+  profiles (all deferred with reasons in the audit doc). **B-008/B-149/B-139b/B-141b/B-140b
+  need the live A/B on the phone** - the recipe is in the B-150 row; the phone was in
+  owner use (Free Fire front) and host RAM was 0.79 GB, so nothing was touched this
+  session. Nothing committed (manager's job). Est. latency effect: typing p50 -2-5 ms
+  (logging) + -3-6 ms in X11 apps (allocs), unlabeled until measured.
 - **Position (2026-11-07, manager review): PHASE 13 IS COMPLETE.** T13-10 closed the last two
   items with live proof: B-130 fixed (ChangePropertyWire), B-103 fixed END-TO-END (focus-gain
   re-read + wine conversion; marker `FOCUSDROP1` pasted into Notepad++ through the real

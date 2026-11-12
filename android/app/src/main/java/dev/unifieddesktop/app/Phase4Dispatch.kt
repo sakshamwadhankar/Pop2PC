@@ -98,6 +98,13 @@ object Phase4Dispatch {
                     }
                     "p12warm" -> Phase4Log.say(ctx, Phase12Preload.configure(arg))
                     "p12nppwarm" -> Phase4Log.say(ctx, Phase12Preload.configureNpp(arg))
+                    // T15-4 item 3: the ABR rule-zero A/B switch (`p12abr:0` = BEFORE run,
+                    // `p12abr:1` = AFTER run). Not debug-gated: it changes a measured
+                    // behaviour for the before/after tables, not a security decision.
+                    "p12abr" -> {
+                        Phase12Tuning.setAbr(arg.trim() != "0")
+                        Phase4Log.say(ctx, "P12ABR on=${Phase12Tuning.abrOn}")
+                    }
                     // B-127 decision (manager 2026-11-07): `p10:thermal N` injects the
                     // governor's thermal input for the D22 paired-proof. DEBUG BUILDS ONLY:
                     // ThermalInjection.parse ignores the action on a release build, so the

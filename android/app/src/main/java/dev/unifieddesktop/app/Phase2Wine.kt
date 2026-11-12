@@ -1066,15 +1066,44 @@ object Phase2Wine {
     /**
      * One fresh boot, waited out under the same monitor as [ensureLivePrefix], so a warm-up,
      * an app open and an installer can never reap each other's wineboot.
+     *
+     * B-141: the first boot of a never-booted prefix takes ~5 min on the phone (measured
+     * 2026-11-08) while a warm boot takes ~35 s, so one fixed 150 s wait made the first
+     * install abort and ask the user to retry. The wait is now first-run aware and the marker
+     * is polled (the wineboot-wait thread writes it on exit 0), with one extra wait round
+     * while the boot process is still alive.
      */
     @Synchronized
     private fun bootAndWait(ctx: Context): Boolean {
+        val cold = !bootMarker(ctx).isFile
         boot(ctx, null)
         val p = wineProc
-        val finished = try {
-            p?.waitFor(150, java.util.concurrent.TimeUnit.SECONDS) == true
-        } catch (_: Throwable) { false }
-        return finished && bootMarker(ctx).isFile
+        var attempt = 0
+        while (true) {
+            val ms = InstallerWait.bootWaitMs(cold && attempt == 0)
+            if (attempt == 0) say("WINE_BOOT wait cold=$cold ms=$ms")
+            val deadline = System.currentTimeMillis() + ms
+            while (System.currentTimeMillis() < deadline) {
+                if (bootMarker(ctx).isFile) {
+                    if (attempt > 0) say("WINE_BOOT_OK on retry attempt=$attempt")
+                    return true
+                }
+                if (p?.isAlive != true) {
+                    // The waiter thread writes the marker just after the process exits; give it
+                    // a moment rather than racing it.
+                    try { Thread.sleep(800) } catch (_: InterruptedException) { }
+                    return bootMarker(ctx).isFile
+                }
+                try { Thread.sleep(250) } catch (_: InterruptedException) { break }
+            }
+            if (!InstallerWait.retryAllowed(attempt, p?.isAlive == true, bootMarker(ctx).isFile)) {
+                break
+            }
+            say("WINE_BOOT still running after ${ms} ms (cold=$cold); one more wait round")
+            attempt++
+        }
+        say("WINE_BOOT timeout cold=$cold attempts=$attempt marker=${bootMarker(ctx).isFile}")
+        return bootMarker(ctx).isFile
     }
 
     /**
@@ -1396,4 +1425,93 @@ object Phase2Wine {
         wsrvProc?.destroy()
         wsrvProc = null
     }
+// ------------------------------------------------------------------ T15-3 imports
+
+/**
+ * T15-3: run an imported MSI with its normal UI on the streamed desktop, so the user clicks
+ * through the installer like on a real PC. Unlike [runInstaller] this never passes /qn and
+ * never waits for (or kills) the installer: the user owns the pace. The caller opens the X11
+ * window first so the installer's window maps into it.
+ */
+fun runMsiInteractive(ctx: Context, msi: File): Boolean {
+    if (!msi.isFile) { say("WINE_MSI missing ${msi.path}"); return false }
+    if (!ensureLivePrefix(ctx, "import msi")) {
+        say("WINE_MSI abort: prefix not ready")
+        writeLog(ctx)
+        return false
+    }
+    val msiexec = File(pinRoot(ctx), "lib/wine/x86_64-windows/msiexec.exe")
+    if (!msiexec.isFile) { say("WINE_MSI fail: msiexec missing ${msiexec.path}"); return false }
+    val pid = startBin(ctx, loaderBin(ctx), waitForExit = false, msiexec.absolutePath, "/i", msi.absolutePath)
+    say("WINE_MSI interactive pid=$pid msi=${msi.name}")
+    writeLog(ctx)
+    return pid > 0
+}
+
+/**
+ * T15-3: the Windows shortcuts an installer left in the prefix. Wine writes .lnk files under
+ * the user's and the all-users Start Menu; the start menu lists them under "Windows programs"
+ * so a freshly installed app can be opened without knowing where it put its exe.
+ * Returns (label, file) pairs, de-duplicated by file name.
+ */
+fun startMenuShortcuts(ctx: Context): List<Pair<String, File>> {
+    val out = LinkedHashMap<String, File>()
+    val home = prefixDir(ctx)
+    val roots = listOf(
+        File(home, "drive_c/users"),
+        File(home, "drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs"),
+    )
+    fun scan(f: File, depth: Int) {
+        if (depth > 4) return
+        val kids = f.listFiles() ?: return
+        for (k in kids) {
+            if (k.isDirectory) { scan(k, depth + 1); continue }
+            if (!k.name.endsWith(".lnk", ignoreCase = true)) continue
+            out.putIfAbsent(k.name.removeSuffix(".lnk").removeSuffix(".LNK"), k)
+        }
+    }
+    for (r in roots) {
+        if (r.isDirectory) scan(r, 0)
+    }
+    return out.map { (name, f) -> name to f }
+}
+
+/**
+ * T15-3: launch a shortcut the installer created. `start.exe /unix <lnk>` resolves the .lnk
+ * through Wine's shell and runs its target, exactly like double-clicking it on Windows.
+ */
+fun runShortcut(ctx: Context, lnk: File): Boolean {
+    if (!lnk.isFile) { say("WINE_LNK missing ${lnk.path}"); return false }
+    if (!ensureLivePrefix(ctx, "shortcut")) return false
+    val start = File(pinRoot(ctx), "lib/wine/x86_64-windows/start.exe")
+    if (!start.isFile) { say("WINE_LNK fail: start.exe missing"); return false }
+    val pid = startBin(ctx, loaderBin(ctx), waitForExit = false, start.absolutePath, "/unix", lnk.absolutePath)
+    say("WINE_LNK pid=$pid lnk=${lnk.name}")
+    writeLog(ctx)
+    return pid > 0
+}
+}
+
+
+/**
+ * B-141: how long an installer may wait for the wineboot that precedes it. Pure so the
+ * first-run rule is unit-tested without the phone.
+ *
+ * Measured on the phone 2026-11-08: a never-booted prefix needed ~5 min for `wineboot -i`
+ * (the first install aborted at the old fixed 150 s and only the manual retry succeeded),
+ * while a warm boot finishes in ~35 s. A boot that is still running when its wait ends gets
+ * one more round instead of failing the install outright.
+ */
+object InstallerWait {
+    /** Cold first boot: 7 min, comfortably above the measured ~5 min on the phone. */
+    const val COLD_BOOT_MS = 420_000L
+
+    /** Warm boot: the shipped 150 s, unchanged (measured ~35 s). */
+    const val WARM_BOOT_MS = 150_000L
+
+    fun bootWaitMs(coldPrefix: Boolean): Long = if (coldPrefix) COLD_BOOT_MS else WARM_BOOT_MS
+
+    /** One more wait round only when the first ended with the boot alive and no marker yet. */
+    fun retryAllowed(attempt: Int, processAlive: Boolean, markerSeen: Boolean): Boolean =
+        attempt == 0 && processAlive && !markerSeen
 }

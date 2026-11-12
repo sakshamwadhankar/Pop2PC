@@ -139,3 +139,10 @@ android/.kotlin/
 
 # Agent evidence (logs, phone UI dumps) stays local, never committed
 evidence/
+
+# Audit 2026-11-13: workspace junk that leaked into the repo root
+/Modelfile
+/.freebuff/
+/undefined/
+
+/.zcode/

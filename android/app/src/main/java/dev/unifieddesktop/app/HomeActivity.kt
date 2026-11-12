@@ -37,7 +37,9 @@ import java.util.Locale
  * a first-run checklist, trusted PCs, Settings and a running notification with Stop.
  *
  * The system dark/light mode picks the palette; the whole page is edge-to-edge with insets
- * applied by hand because this app ships no AndroidX/Material dependency.
+ * applied by hand. The HOME UI ships no AndroidX/Material; androidx.media is used only for
+ * the session audio MediaStyle notification (SessionAudioMute) - keep the claim scoped
+ * to the UI (audit docs-truth fix).
  */
 class HomeActivity : Activity() {
 

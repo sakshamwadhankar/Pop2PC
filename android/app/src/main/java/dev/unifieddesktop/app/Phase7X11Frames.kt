@@ -16,5 +16,16 @@ package dev.unifieddesktop.app
 internal fun x11ImageUnchanged(prev: ByteArray?, now: ByteArray): Boolean =
     prev != null && prev.contentEquals(now)
 
+/**
+ * Audit B-140b: the scratch-buffer twin of [x11ImageUnchanged]. The X11 client now reads
+ * every GetImage reply into one reusable buffer, so the compare sees the first [len] bytes
+ * of [cur]; a previously retained [prev] of a different size can never match.
+ */
+internal fun x11ImageUnchangedLen(prev: ByteArray?, cur: ByteArray, len: Int): Boolean {
+    if (prev == null || prev.size != len || cur.size < len) return false
+    for (i in 0 until len) if (prev[i] != cur[i]) return false
+    return true
+}
+
 /** Grab period: 8 ms for 300 ms after a key (echo), 120 ms when idle. */
 internal fun x11PollDelayMs(sinceKeyMs: Long): Int = if (sinceKeyMs < 300) 8 else 120

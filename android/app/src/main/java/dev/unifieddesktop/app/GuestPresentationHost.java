@@ -264,6 +264,33 @@ final class GuestPresentationHost extends AppLifecycleCallback {
         attrs.alpha = 0f;
         activity.getWindow().setAttributes(attrs);
         activity.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+        // B-008 (owner direction 2026-11-13): an alpha-0 window is still OPAQUE for the
+        // window manager, so display 0 treated everything behind it as invisible - the home
+        // activity behind was STOPPED and the phone composited a black screen while the
+        // guest ran hidden. Making the window TRANSLUCENT (public Window/Activity APIs, no
+        // theme dependency, applied before super.onCreate so the decor install sees it)
+        // keeps the activity behind STARTED (only onPause, never onStop), so the phone
+        // keeps showing real content, while the guest itself stays RESUMED (front task) and
+        // its Presentation on the private display keeps rendering. Home-to-front was
+        // measured killing the guest stream (T15-2B); the translucent window is the
+        // lifecycle-correct replacement. Sources: Activity.setTranslucent() semantics -
+        // https://stackoverflow.com/questions/51536494/ and
+        // https://developer.android.com/guide/components/activities/tasks-and-back-stack
+        try {
+            activity.getWindow().setBackgroundDrawable(
+                    new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
+            activity.getWindow().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
+            // setTranslucent is the part that tells the system the activity behind must
+            // stay STARTED (it runs the AMS convert-to-translucent IPC); public since
+            // API 30. On API 29 the window still composites transparently (no black paint),
+            // but the behind-activity lifecycle guarantee lands with API 30+.
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                activity.setTranslucent(true);
+            }
+            Log.i(TAG, "B008 guest window made translucent (display-0 behind stays started)");
+        } catch (Throwable t) {
+            Log.w(TAG, "B008 translucent window failed", t);
+        }
         // Tasks otherwise requests the phone's portrait orientation. The private display is
         // landscape, so make the guest create its content in the target orientation and
         // target density before its first layout.

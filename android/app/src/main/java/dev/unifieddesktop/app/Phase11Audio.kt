@@ -38,6 +38,12 @@ object Phase11Audio {
     @Volatile private var projection: MediaProjection? = null
     @Volatile private var capture: Capture? = null
     @Volatile private var sink: ((ByteArray) -> Boolean)? = null
+    /**
+     * Audit B-143: who bound the sink (the service passes its [Phase4LinkService.LiveSession]).
+     * The old unconditional unbind let a replaced session's teardown stop the capture the
+     * NEW session had just bound, killing PC audio for the rest of that session.
+     */
+    @Volatile private var sinkOwner: Any? = null
 
     private fun log(line: String) = Log.i(TAG, line)
 
@@ -100,14 +106,27 @@ object Phase11Audio {
         startCapture(p, push)
     }
 
-    fun bindSink(push: (ByteArray) -> Boolean) {
+    /**
+     * Bind the packet sink for [owner] (the caller's session identity). A second bind with
+     * a different owner replaces the first (trusted reconnect); an unbind from an owner
+     * that is not the current one is ignored, so a dying old session can never stop the
+     * new session's capture (audit B-143 — the same guard Phase11Files.bindSender uses).
+     */
+    fun bindSink(owner: Any?, push: (ByteArray) -> Boolean) {
+        sinkOwner = owner
         sink = push
         val p = projection
         if (p != null && capture == null) startCapture(p, push)
         else if (p == null) log("P11AUDIO session open, waiting for consent")
     }
 
-    fun unbindSink(reason: String) {
+    /** Stop the capture only when [owner] is the one that bound it (null = service stop). */
+    fun unbindSink(owner: Any?, reason: String) {
+        if (owner != null && sinkOwner != null && sinkOwner !== owner) {
+            log("P11AUDIO unbind ignored (owner replaced; $reason)")
+            return
+        }
+        sinkOwner = null
         sink = null
         stopCapture(reason)
     }

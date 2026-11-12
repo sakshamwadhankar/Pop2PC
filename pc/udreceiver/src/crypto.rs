@@ -127,9 +127,24 @@ impl ReceiverIdentity {
 /// (pinned phone) or runs the visible pairing step (6-digit code + Yes on the phone).
 /// A new or second phone can therefore always pair, even when other phones are pinned;
 /// the pairing code binds both certificates.
-#[derive(Clone)]
 pub struct PhoneCertVerifier {
     algos: WebPkiSupportedAlgorithms,
+    /// Audit: the webpki verifier (RootCertStore + WebPkiServerVerifier) was rebuilt for
+    /// every TLS connection. One phone keeps one cert, so cache the verifier by cert DER;
+    /// the `now` argument is validated per verify call, so caching the verifier is safe.
+    /// Clones (one per ClientConfig) share the cache.
+    cache: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<Vec<u8>, std::sync::Arc<WebPkiServerVerifier>>>,
+    >,
+}
+
+impl Clone for PhoneCertVerifier {
+    fn clone(&self) -> Self {
+        PhoneCertVerifier {
+            algos: self.algos,
+            cache: self.cache.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for PhoneCertVerifier {
@@ -143,6 +158,7 @@ impl PhoneCertVerifier {
         ensure_ring_default();
         PhoneCertVerifier {
             algos: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -178,13 +194,27 @@ impl ServerCertVerifier for PhoneCertVerifier {
         // Validate the self-signed cert with webpki, root = itself. This checks
         // signatures, validity, key usage, and SAN; the webpki name check runs against
         // TLS_SERVER_NAME, which every phone cert must carry as SAN.
-        let mut roots = RootCertStore::empty();
-        roots
-            .add(end_entity.clone())
-            .map_err(|e| RustlsError::General(format!("bad cert: {e}")))?;
-        let wp = WebPkiServerVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|e| RustlsError::General(format!("verifier: {e}")))?;
+        let key = end_entity.as_ref().to_vec();
+        let cached = self.cache.lock().unwrap().get(&key).cloned();
+        let wp = match cached {
+            Some(wp) => wp,
+            None => {
+                let mut roots = RootCertStore::empty();
+                roots
+                    .add(end_entity.clone())
+                    .map_err(|e| RustlsError::General(format!("bad cert: {e}")))?;
+                let built = WebPkiServerVerifier::builder(Arc::new(roots))
+                    .build()
+                    .map_err(|e| RustlsError::General(format!("verifier: {e}")))?;
+                let mut cache = self.cache.lock().unwrap();
+                // small cap: a rotation produces a new DER, an old entry just ages out
+                if cache.len() >= 8 {
+                    cache.clear();
+                }
+                cache.insert(key, built.clone());
+                built
+            }
+        };
         let name = ServerName::try_from(TLS_SERVER_NAME.to_string())
             .map_err(|e| RustlsError::General(format!("name: {e}")))?;
         wp.verify_server_cert(end_entity, &[], &name, ocsp, now)
