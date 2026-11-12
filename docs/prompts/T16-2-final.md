@@ -36,6 +36,11 @@ One fresh session covering the whole product, screenshot/log per step:
 - Desktop: Notepad++ typing (marker `pop16final`), Browser google search (robot-wall
   honest note), VS Code opens (no white page), App Center shows Notepad++ installed.
 - Import: import one .exe from the PC -> launches -> still listed after restart.
+- **OWED from T15-4 (fold in here): the ABR A/B typing tables** — 3x25 keys with
+  `p12abr:0` then 3x25 keys with `p12abr:1` (runtime toggle, same session, same
+  conditions, thermal recorded), LATSTAGE p50/p90 both runs; append both tables to
+  Temp\opencode\t15-4\RESULT.txt and note the delta. This closes T15-4 item 3's owed
+  rule-zero measurement.
 - Audio: YouTube plays -> phone silent, PC audible (the mute toggle ON).
 - Exit: clean exit -> journal clean -> Default desktop restored.
 - Cleanup: the full teardown recipe (0 processes, 0 receivers, 0 forwards, stay_on 0,
