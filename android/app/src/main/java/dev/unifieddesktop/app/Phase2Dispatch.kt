@@ -64,6 +64,14 @@ object Phase2Dispatch {
                     "wsrv" -> Phase2Wine.ensureWineserver(ctx)
                     "killall" -> { Phase2Wine.reapLeftoverProcesses(ctx, "killall"); Phase2Wine.killWine(); Phase2X11.killXvfb() }
                     "runbin" -> Phase2X11.runGuestShell(ctx, arg)
+                    // T15-6: the Linux layer. "linuxensure" fetches + unpacks the
+                    // pinned arm64 sysroot manifest (resume + sha), "linuxrun:<key>"
+                    // plans + starts a demo app (busybox / firefox / x86xeyes).
+                    "linuxensure" -> {
+                        val ok = LinuxSysroot.ensure(ctx)
+                        LinuxSysroot.say("LINUXENSURE ok=$ok")
+                    }
+                    "linuxrun" -> LinuxLaunch.runHarness(ctx, arg.ifEmpty { "busybox" })
                     else -> Phase2X11.say("PHASE2X unknown [$what] codes=${what.map { it.code }.take(12)}")
                 }
             } catch (t: Throwable) {

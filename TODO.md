@@ -1,4 +1,4 @@
-T15-2B: COMPLETE 2026-11-09 00:56. B-008 (b) proven impossible live; (a) measured FAIL (home-to-front stops the guest, PC black at +8 s/+20 s) -> B008Policy.HOME_TO_FRONT=false, no-move guard stays, B-008 OPEN. Gates: Android 316/0/3, cargo 103/0, clippy 0, diff-check 0, AAB 171,994,838 B. Report: Temp\opencode\t15-2\RESULT.txt.
+T15-6: COMPLETE 2026-11-13 02:29. Linux layer: LinuxRuntime (12T) + LinuxSysroot manifest/fetch (9T) + LinuxLaunch plan (7T) = 28/28 green; Android gate 344/0/3, cargo 101/102 (1 environmental vs live session, BUGS proposal), clippy 0, diff-check 0, AAB 172,008,233 B (+13,395 vs T15-2B, 0 sysroot entries). Report: Temp/opencode/t15-6/RESULT.txt.
 
 # Night run: Phase 12 finish + Phase 13 polish
 
