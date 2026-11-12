@@ -1,3 +1,4 @@
+T15-6: COMPLETE 2026-11-13 02:29. Linux layer: LinuxRuntime (12T) + LinuxSysroot manifest/fetch (9T) + LinuxLaunch plan (7T) = 28/28 green; Android gate 344/0/3, cargo 101/102 (1 environmental vs live session, BUGS proposal), clippy 0, diff-check 0, AAB 172,008,233 B (+13,395 vs T15-2B, 0 sysroot entries). Report: Temp/opencode/t15-6/RESULT.txt.
 T15-4: done 5 of 6. Updated 03:00. Now: STOPPED - ABR A/B + item-2 typing tables owed (owner actively on PC every retry; recipe in Temp/opencode/t15-4). Code+proofs+AAB done.
 
 # Night run: Phase 12 finish + Phase 13 polish
